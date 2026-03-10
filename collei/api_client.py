@@ -1,0 +1,303 @@
+"""
+API 客户端模块
+
+负责与 Collei 控制端的 HTTP 通信，包含注册、验证和数据上报接口。
+包含重试与指数退避逻辑。
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# 默认超时（秒）
+DEFAULT_TIMEOUT = 15.0
+
+# 退避策略
+BACKOFF_INITIAL = 5.0      # 初始退避（秒）
+BACKOFF_MAX = 300.0         # 最大退避（秒）
+BACKOFF_FACTOR = 2.0        # 退避因子
+
+
+class ApiError(Exception):
+    """API 调用异常"""
+
+    def __init__(self, status_code: int, detail: str = "", headers: Optional[dict] = None):
+        self.status_code = status_code
+        self.detail = detail
+        self.headers: dict = headers or {}
+        super().__init__(f"HTTP {status_code}: {detail}")
+
+
+class TokenInvalid(ApiError):
+    """401 - Token 无效"""
+    pass
+
+
+class ServerNotApproved(ApiError):
+    """403 - 服务器未被批准"""
+    pass
+
+
+class RegistrationNotConfigured(ApiError):
+    """503 - 未配置全局注册密钥"""
+    pass
+
+
+# ---------------------------------------------------------------------------
+# 响应数据模型
+# ---------------------------------------------------------------------------
+
+@dataclass
+class RegisterResponse:
+    uuid: str
+    token: str
+
+
+@dataclass
+class VerifyResponse:
+    uuid: str
+    token: str
+    is_approved: int
+
+
+@dataclass
+class ReportResponse:
+    uuid: str
+    is_approved: int
+    received: bool
+
+
+# ---------------------------------------------------------------------------
+# API 客户端
+# ---------------------------------------------------------------------------
+
+class ColleiApiClient:
+    """Collei 控制端 API 客户端"""
+
+    def __init__(self, base_url: str, timeout: float = DEFAULT_TIMEOUT) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._agent_base = f"{self.base_url}/api/v1/agent"
+        self.timeout = timeout
+        self._client = httpx.Client(timeout=timeout)
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+    # ---- 公开接口 ----
+
+    def register(
+        self,
+        reg_token: str,
+        name: str,
+        hardware: Optional[dict] = None,
+        version: str = "",
+    ) -> RegisterResponse:
+        """
+        自动注册（全局密钥模式）
+        POST /api/v1/agent/register
+        """
+        payload: dict[str, Any] = {
+            "reg_token": reg_token,
+            "name": name,
+        }
+        if hardware:
+            payload.update(hardware)
+        if version:
+            payload["version"] = version
+
+        data = self._post(f"{self._agent_base}/register", payload)
+        return RegisterResponse(uuid=data["uuid"], token=data["token"])
+
+    def verify(
+        self,
+        token: str,
+        name: str = "",
+        hardware: Optional[dict] = None,
+        version: str = "",
+    ) -> VerifyResponse:
+        """
+        被动注册验证 / 身份验证
+        POST /api/v1/agent/verify
+        """
+        payload: dict[str, Any] = {"token": token}
+        if name:
+            payload["name"] = name
+        if hardware:
+            payload.update(hardware)
+        if version:
+            payload["version"] = version
+
+        data = self._post(f"{self._agent_base}/verify", payload)
+        return VerifyResponse(
+            uuid=data["uuid"],
+            token=data["token"],
+            is_approved=data.get("is_approved", 0),
+        )
+
+    def report(
+        self,
+        token: str,
+        hardware: Optional[dict] = None,
+        load_data: Optional[dict] = None,
+        total_flow_in: Optional[int] = None,
+        total_flow_out: Optional[int] = None,
+    ) -> ReportResponse:
+        """
+        混合上报（硬件信息 + 监控数据）
+        POST /api/v1/agent/report
+        """
+        payload: dict[str, Any] = {"token": token}
+        if hardware:
+            payload.update(hardware)
+        if load_data:
+            payload["load_data"] = load_data
+        if total_flow_in is not None:
+            payload["total_flow_in"] = total_flow_in
+        if total_flow_out is not None:
+            payload["total_flow_out"] = total_flow_out
+        data = self._post(f"{self._agent_base}/report", payload)
+        return ReportResponse(
+            uuid=data["uuid"],
+            is_approved=data.get("is_approved", 1),
+            received=data.get("received", False),
+        )
+
+    # ---- HTTP 层 ----
+
+    def _post(self, url: str, payload: dict) -> dict:
+        """执行 POST 请求并处理错误"""
+        logger.debug("POST %s  payload_keys=%s", url, list(payload.keys()))
+        try:
+            resp = self._client.post(url, json=payload)
+        except httpx.RequestError as exc:
+            logger.error("请求失败: %s", exc)
+            raise
+
+        return self._handle_response(resp)
+
+    @staticmethod
+    def _handle_response(resp: httpx.Response) -> dict:
+        """解析响应，按状态码抛出对应异常"""
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            logger.debug("响应: %s", data)
+            return data
+
+        # 尝试解析错误详情
+        detail = _extract_detail(resp)
+
+        logger.debug("API 错误 %d: %s", resp.status_code, detail)
+
+        headers = dict(resp.headers)
+        if resp.status_code == 401:
+            raise TokenInvalid(resp.status_code, detail, headers)
+        elif resp.status_code == 403:
+            raise ServerNotApproved(resp.status_code, detail, headers)
+        elif resp.status_code == 503:
+            raise RegistrationNotConfigured(resp.status_code, detail, headers)
+        else:
+            raise ApiError(resp.status_code, detail, headers)
+
+
+# ---------------------------------------------------------------------------
+# 带退避的请求辅助
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 内部工具
+# ---------------------------------------------------------------------------
+
+def _extract_detail(resp: httpx.Response) -> str:
+    """
+    从响应中提取人类可读的错误描述。
+
+    优先级：
+      1. JSON body 中的 "detail" 字段
+      2. JSON body 的完整字符串表示
+      3. 纯文本 body（截断至 200 字符）
+      4. HTTP 原因短语（如 "Bad Gateway"）
+      5. 状态码字符串
+    """
+    # 尝试解析 JSON
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            if "detail" in body:
+                return str(body["detail"])
+            # 兼容 FastAPI 的 {"message": ...} 等格式
+            for key in ("message", "error", "msg"):
+                if key in body:
+                    return str(body[key])
+        return str(body)[:300]
+    except Exception:
+        pass
+
+    # 纯文本 body
+    text = (resp.text or "").strip()
+    # 过滤掉 HTML（nginx 错误页等），只保留第一行有意义的内容
+    if text and not text.startswith("<"):
+        return text[:200]
+
+    # 使用 HTTP 原因短语作为兜底
+    reason = getattr(resp, "reason_phrase", None)
+    if reason:
+        # httpx 返回 bytes，需解码
+        if isinstance(reason, bytes):
+            reason = reason.decode("utf-8", errors="replace")
+        return reason
+
+    return str(resp.status_code)
+
+
+class BackoffHelper:
+    """指数退避辅助工具"""
+
+    def __init__(
+        self,
+        initial: float = BACKOFF_INITIAL,
+        maximum: float = BACKOFF_MAX,
+        factor: float = BACKOFF_FACTOR,
+        stop_event: Optional[threading.Event] = None,
+    ) -> None:
+        self.initial = initial
+        self.maximum = maximum
+        self.factor = factor
+        self._current = initial
+        self._stop_event = stop_event
+
+    def reset(self) -> None:
+        self._current = self.initial
+
+    @property
+    def delay(self) -> float:
+        return self._current
+
+    def step(self) -> float:
+        """返回当前延迟并递增"""
+        d = self._current
+        self._current = min(self._current * self.factor, self.maximum)
+        return d
+
+    def wait(self) -> None:
+        """等待当前延迟时长"""
+        d = self.step()
+        logger.info("退避等待 %.1f 秒...", d)
+        if self._stop_event is not None:
+            self._stop_event.wait(d)
+        else:
+            time.sleep(d)
