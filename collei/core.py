@@ -27,6 +27,7 @@ from collei.api_client import (
 )
 from collei.collector import SystemCollector
 from collei.config import AgentConfig, DEFAULT_CONFIG_DIR
+from collei.network_monitor import NetworkMonitor
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +61,7 @@ class ColleiAgent:
             network_interface=config.network_interface,
             state_dir=state_dir,
         )
+        self._network = NetworkMonitor(stop_event=self._stop_event)
         self._backoff = BackoffHelper(stop_event=self._stop_event)
 
     # ---- 生命周期 ----
@@ -217,6 +219,7 @@ class ColleiAgent:
         logger.info("验证成功! UUID=%s, is_approved=%d", resp.uuid, resp.is_approved)
 
         if resp.is_approved == 1:
+            self._network.handle_dispatch(resp.network_dispatch)
             self.state = AgentState.REPORTING
         else:
             logger.info("服务器尚未被批准，进入等待模式")
@@ -272,6 +275,7 @@ class ColleiAgent:
                 load = self._collector.collect_load()
                 hw_changes = self._collector.collect_hardware_if_changed()
                 total_flow_in, total_flow_out = self._collector.collect_total_flow()
+                network_results = self._network.flush_pending_results()
                 # 上报
                 resp = self._api.report(
                     token=self.config.token,
@@ -279,6 +283,8 @@ class ColleiAgent:
                     load_data=load.to_dict(),
                     total_flow_in=total_flow_in,
                     total_flow_out=total_flow_out,
+                    network_version=self._network.version,
+                    network_data=network_results or None,
                 )
 
                 if resp.received:
@@ -287,6 +293,7 @@ class ColleiAgent:
                         "上报成功: cpu=%.1f%% ram=%d net_in=%d net_out=%d",
                         load.cpu, load.ram, load.net_in, load.net_out,
                     )
+                self._network.handle_dispatch(resp.network_dispatch)
                 self._backoff.reset()
 
             except ServerNotApproved:
@@ -345,6 +352,7 @@ class ColleiAgent:
     def _shutdown(self) -> None:
         """清理资源"""
         self.state = AgentState.STOPPED
+        self._network.stop()
         if self._api:
             self._api.close()
             self._api = None

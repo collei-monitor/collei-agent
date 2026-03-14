@@ -67,6 +67,7 @@ class VerifyResponse:
     uuid: str
     token: str
     is_approved: int
+    network_dispatch: Optional[dict] = None
 
 
 @dataclass
@@ -74,6 +75,7 @@ class ReportResponse:
     uuid: str
     is_approved: int
     received: bool
+    network_dispatch: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +149,7 @@ class ColleiApiClient:
             uuid=data["uuid"],
             token=data["token"],
             is_approved=data.get("is_approved", 0),
+            network_dispatch=data.get("network_dispatch"),
         )
 
     def report(
@@ -156,9 +159,11 @@ class ColleiApiClient:
         load_data: Optional[dict] = None,
         total_flow_in: Optional[int] = None,
         total_flow_out: Optional[int] = None,
+        network_version: Optional[str] = None,
+        network_data: Optional[list[dict]] = None,
     ) -> ReportResponse:
         """
-        混合上报（硬件信息 + 监控数据）
+        混合上报（硬件信息 + 监控数据 + 网络探测结果）
         POST /api/v1/agent/report
         """
         payload: dict[str, Any] = {"token": token}
@@ -170,11 +175,16 @@ class ColleiApiClient:
             payload["total_flow_in"] = total_flow_in
         if total_flow_out is not None:
             payload["total_flow_out"] = total_flow_out
+        if network_version is not None:
+            payload["network_version"] = network_version
+        if network_data:
+            payload["network_data"] = network_data
         data = self._post(f"{self._agent_base}/report", payload)
         return ReportResponse(
             uuid=data["uuid"],
             is_approved=data.get("is_approved", 1),
             received=data.get("received", False),
+            network_dispatch=data.get("network_dispatch"),
         )
 
     # ---- HTTP 层 ----

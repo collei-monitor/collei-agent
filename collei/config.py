@@ -43,7 +43,7 @@ class AgentConfig:
     # --- 运行时参数（不持久化） ---
     reg_token: str = field(default="", repr=False)
     name: str = ""
-    report_interval: float = 3.0  # 上报间隔（秒）
+    report_interval: float = 2.0  # 上报间隔（秒）
     verify_interval: float = 5.0  # 等待审批轮询间隔（秒）
     force_register: bool = False  # 强制重新注册（覆盖本地配置）
 
