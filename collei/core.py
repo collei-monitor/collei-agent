@@ -20,7 +20,6 @@ import httpx
 from collei import __version__
 from collei.api_client import (
     ColleiApiClient,
-    BackoffHelper,
     ApiError,
     TokenInvalid,
     ServerNotApproved,
@@ -63,7 +62,6 @@ class ColleiAgent:
             state_dir=state_dir,
         )
         self._network = NetworkMonitor(stop_event=self._stop_event)
-        self._backoff = BackoffHelper(stop_event=self._stop_event)
 
     # ---- 生命周期 ----
 
@@ -119,7 +117,7 @@ class ColleiAgent:
             except Exception as exc:
                 logger.error("主循环异常: %s", exc, exc_info=True)
                 if self._running:
-                    self._backoff.wait()
+                    self._interruptible_sleep(5.0)
 
     # ---- 注册 / 验证 ----
 
@@ -162,10 +160,10 @@ class ColleiAgent:
                 return
             except httpx.RequestError as exc:
                 logger.warning("连接控制端失败: %s", exc)
-                self._backoff.wait()
+                self._interruptible_sleep(5.0)
             except ApiError as exc:
                 logger.error("注册/验证 API 错误: %s", exc)
-                self._backoff.wait()
+                self._interruptible_sleep(5.0)
 
     def _do_register(self) -> None:
         """执行自动注册"""
@@ -188,7 +186,6 @@ class ColleiAgent:
         self.config.uuid = resp.uuid
         self.config.token = resp.token
         self.config.save()
-        self._backoff.reset()
 
         logger.info("注册成功! UUID=%s", resp.uuid)
         logger.info("服务器待审核 (is_approved=0)，进入等待模式")
@@ -215,7 +212,6 @@ class ColleiAgent:
         self.config.uuid = resp.uuid
         self.config.token = resp.token
         self.config.save()
-        self._backoff.reset()
 
         logger.info("验证成功! UUID=%s, is_approved=%d", resp.uuid, resp.is_approved)
 
@@ -247,7 +243,6 @@ class ColleiAgent:
                 if resp.is_approved == 1:
                     logger.info("服务器已被批准! 开始上报数据")
                     self.state = AgentState.REPORTING
-                    self._backoff.reset()
                     return
                 else:
                     logger.debug("仍在等待审批...")
@@ -296,7 +291,6 @@ class ColleiAgent:
                     )
                 self._network.handle_dispatch(resp.network_dispatch)
                 self._handle_ssh_tunnel(resp.ssh_tunnel)
-                self._backoff.reset()
 
             except ServerNotApproved:
                 logger.warning("服务器审批状态已变更，回退至等待模式")
@@ -310,16 +304,16 @@ class ColleiAgent:
 
             except httpx.RequestError as exc:
                 logger.warning("上报失败 (网络): %s", exc)
-                self._backoff.wait()
+                self._interruptible_sleep(5.0)
                 continue
 
             except ApiError as exc:
                 if exc.status_code >= 500:
                     logger.warning(
-                        "服务端错误 %d (%s)，退避重试",
+                        "服务端错误 %d (%s)，重试",
                         exc.status_code, exc.detail or "no detail",
                     )
-                    self._backoff.wait()
+                    self._interruptible_sleep(5.0)
                     continue
                 elif exc.status_code == 429:
                     retry_after = _parse_retry_after(exc.headers)
@@ -327,12 +321,12 @@ class ColleiAgent:
                         logger.warning("请求频率过高，等待 %.0f 秒后重试", retry_after)
                         self._interruptible_sleep(retry_after)
                     else:
-                        logger.warning("请求频率过高，退避重试")
-                        self._backoff.wait()
+                        logger.warning("请求频率过高，重试")
+                        self._interruptible_sleep(5.0)
                     continue
                 else:
                     logger.error("上报异常 %d: %s", exc.status_code, exc.detail)
-                    self._backoff.wait()
+                    self._interruptible_sleep(5.0)
                     continue
 
             # 正常间隔等待

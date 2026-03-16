@@ -2,14 +2,11 @@
 API 客户端模块
 
 负责与 Collei 控制端的 HTTP 通信，包含注册、验证和数据上报接口。
-包含重试与指数退避逻辑。
 """
 
 from __future__ import annotations
 
 import logging
-import threading
-import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional
@@ -20,11 +17,6 @@ logger = logging.getLogger(__name__)
 
 # 默认超时（秒）
 DEFAULT_TIMEOUT = 15.0
-
-# 退避策略
-BACKOFF_INITIAL = 5.0      # 初始退避（秒）
-BACKOFF_MAX = 300.0         # 最大退避（秒）
-BACKOFF_FACTOR = 2.0        # 退避因子
 
 
 class ApiError(Exception):
@@ -227,10 +219,6 @@ class ColleiApiClient:
 
 
 # ---------------------------------------------------------------------------
-# 带退避的请求辅助
-# ---------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------
 # 内部工具
 # ---------------------------------------------------------------------------
 
@@ -275,41 +263,3 @@ def _extract_detail(resp: httpx.Response) -> str:
 
     return str(resp.status_code)
 
-
-class BackoffHelper:
-    """指数退避辅助工具"""
-
-    def __init__(
-        self,
-        initial: float = BACKOFF_INITIAL,
-        maximum: float = BACKOFF_MAX,
-        factor: float = BACKOFF_FACTOR,
-        stop_event: Optional[threading.Event] = None,
-    ) -> None:
-        self.initial = initial
-        self.maximum = maximum
-        self.factor = factor
-        self._current = initial
-        self._stop_event = stop_event
-
-    def reset(self) -> None:
-        self._current = self.initial
-
-    @property
-    def delay(self) -> float:
-        return self._current
-
-    def step(self) -> float:
-        """返回当前延迟并递增"""
-        d = self._current
-        self._current = min(self._current * self.factor, self.maximum)
-        return d
-
-    def wait(self) -> None:
-        """等待当前延迟时长"""
-        d = self.step()
-        logger.info("退避等待 %.1f 秒...", d)
-        if self._stop_event is not None:
-            self._stop_event.wait(d)
-        else:
-            time.sleep(d)

@@ -2,12 +2,18 @@
 # ============================================================================
 # Collei Agent 一键部署脚本
 #
-# 用法:
+# 用法（安装）:
 #   wget -O- https://raw.githubusercontent.com/collei-monitor/collei-agent/main/install.sh | bash -s -- \
 #       --url https://api.example.com --reg-token YOUR_TOKEN
 #
 #   或下载后执行:
 #   bash install.sh --url https://api.example.com --reg-token YOUR_TOKEN [OPTIONS]
+#
+# 用法（卸载）:
+#   wget -O- https://raw.githubusercontent.com/collei-monitor/collei-agent/main/install.sh | bash -s -- uninstall
+#
+#   或下载后执行:
+#   bash install.sh uninstall
 #
 # 子命令:
 #   install (默认)  安装 Agent

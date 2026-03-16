@@ -36,10 +36,10 @@ jobs:
       - name: Build AMD64 Binary
         if: matrix.arch == 'amd64'
         run: |
+          sudo apt-get update && sudo apt-get install -y binutils
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller setuptools
           pyinstaller --onefile --name ${{ matrix.name }} agent.py
-          # PyInstaller 产出的单文件直接就可以用了
 
       - name: Build ARM64 Binary
         if: matrix.arch == 'arm64'
@@ -47,7 +47,8 @@ jobs:
           docker run --rm -v ${{ github.workspace }}:/workspace \
             --platform linux/arm64 \
             python:3.13-slim-bullseye \
-            bash -c "cd /workspace && \
+            bash -c "apt-get update && apt-get install -y binutils && \
+            cd /workspace && \
             pip install --upgrade pip && \
             pip install -r requirements.txt pyinstaller setuptools && \
             pyinstaller --onefile --name ${{ matrix.name }} agent.py && \
