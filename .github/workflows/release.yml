@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         include:
@@ -36,26 +36,21 @@ jobs:
       - name: Build AMD64 Binary
         if: matrix.arch == 'amd64'
         run: |
-          sudo apt-get update && sudo apt-get install -y patchelf
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller staticx setuptools
+          pip install -r requirements.txt pyinstaller setuptools
           pyinstaller --onefile --name ${{ matrix.name }} agent.py
-          staticx dist/${{ matrix.name }} dist/${{ matrix.name }}-static
-          mv dist/${{ matrix.name }}-static dist/${{ matrix.name }}
+          # PyInstaller 产出的单文件直接就可以用了
 
       - name: Build ARM64 Binary
         if: matrix.arch == 'arm64'
         run: |
           docker run --rm -v ${{ github.workspace }}:/workspace \
             --platform linux/arm64 \
-            python:3.13 \
+            python:3.13-slim-bullseye \
             bash -c "cd /workspace && \
-            apt-get update && apt-get install -y patchelf && \
             pip install --upgrade pip && \
-            pip install -r requirements.txt pyinstaller staticx setuptools && \
+            pip install -r requirements.txt pyinstaller setuptools && \
             pyinstaller --onefile --name ${{ matrix.name }} agent.py && \
-            staticx dist/${{ matrix.name }} dist/${{ matrix.name }}-static && \
-            mv dist/${{ matrix.name }}-static dist/${{ matrix.name }} && \
             chown -R $(id -u):$(id -g) dist build *.spec"
 
       - name: Upload to GitHub Release
