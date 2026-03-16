@@ -36,9 +36,12 @@ jobs:
       - name: Build AMD64 Binary
         if: matrix.arch == 'amd64'
         run: |
+          sudo apt-get update && sudo apt-get install -y patchelf
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install -r requirements.txt pyinstaller staticx
           pyinstaller --onefile --name ${{ matrix.name }} agent.py
+          staticx dist/${{ matrix.name }} dist/${{ matrix.name }}-static
+          mv dist/${{ matrix.name }}-static dist/${{ matrix.name }}
 
       - name: Build ARM64 Binary
         if: matrix.arch == 'arm64'
@@ -47,9 +50,12 @@ jobs:
             --platform linux/arm64 \
             python:3.13 \
             bash -c "cd /workspace && \
+            apt-get update && apt-get install -y patchelf && \
             pip install --upgrade pip && \
-            pip install -r requirements.txt pyinstaller && \
+            pip install -r requirements.txt pyinstaller staticx && \
             pyinstaller --onefile --name ${{ matrix.name }} agent.py && \
+            staticx dist/${{ matrix.name }} dist/${{ matrix.name }}-static && \
+            mv dist/${{ matrix.name }}-static dist/${{ matrix.name }} && \
             chown -R $(id -u):$(id -g) dist build *.spec"
 
       - name: Upload to GitHub Release

@@ -12,6 +12,7 @@
 # 子命令:
 #   install (默认)  安装 Agent
 #   update-ca       更新 SSH CA 公钥（密钥轮换）
+#   uninstall       卸载 Agent 并清理配置
 # ============================================================================
 set -euo pipefail
 
@@ -199,6 +200,7 @@ parse_args() {
                 VERSION="$2"; shift 2 ;;
             --config)
                 CONFIG_FILE="$2"; shift 2 ;;
+
             -h|--help)
                 show_help; exit 0 ;;
             *)
@@ -217,6 +219,7 @@ Collei Agent 一键部署脚本
 用法:
   install.sh [install] [OPTIONS]   安装 Agent
   install.sh update-ca [OPTIONS]   更新 SSH CA 公钥
+  install.sh uninstall [OPTIONS]   卸载 Agent 并清理
 
 安装选项:
   --url <URL>             控制端 API 地址（必须）
@@ -233,6 +236,10 @@ Collei Agent 一键部署脚本
 
 update-ca 选项:
   --config <PATH>         配置文件路径（默认自动检测）
+
+uninstall 选项:
+  --install-dir <DIR>     二进制安装目录（默认自动检测）
+  --config-dir <DIR>      配置文件目录（默认自动检测）
 
 通用:
   -h, --help              显示此帮助信息
@@ -557,6 +564,86 @@ do_update_ca() {
     info "CA 公钥更新完成"
 }
 
+# ======================== 卸载流程 ========================
+
+do_uninstall() {
+    [[ -z "$INSTALL_DIR" ]] && INSTALL_DIR=$(default_install_dir)
+    [[ -z "$CONFIG_DIR" ]] && CONFIG_DIR=$(default_config_dir)
+
+    echo ""
+    echo "============================================"
+    echo "      Collei Agent 卸载"
+    echo "============================================"
+    echo ""
+
+    # 1. 停止并移除 systemd 服务
+    if is_root && command -v systemctl &>/dev/null; then
+        if systemctl list-unit-files collei-agent.service &>/dev/null; then
+            step "停止 systemd 服务..."
+            systemctl stop collei-agent 2>/dev/null || true
+            systemctl disable collei-agent 2>/dev/null || true
+            rm -f /etc/systemd/system/collei-agent.service
+            systemctl daemon-reload
+            info "systemd 服务已移除"
+        else
+            info "未发现 systemd 服务，跳过"
+        fi
+    else
+        info "非 root 或无 systemd，跳过服务清理"
+    fi
+
+    # 2. 删除二进制文件
+    local binary="${INSTALL_DIR}/${BINARY_NAME}"
+    if [[ -f "$binary" ]]; then
+        step "删除二进制文件..."
+        rm -f "$binary"
+        info "已删除 ${binary}"
+    else
+        info "未找到二进制文件 ${binary}，跳过"
+    fi
+
+    # 3. 删除配置目录
+    if [[ -d "$CONFIG_DIR" ]]; then
+        step "删除配置目录..."
+        rm -rf "$CONFIG_DIR"
+        info "已删除 ${CONFIG_DIR}"
+    else
+        info "未找到配置目录 ${CONFIG_DIR}，跳过"
+    fi
+
+    # 4. 清除 CA 配置（仅 root）
+    if is_root; then
+        step "清除 SSH CA 配置..."
+
+        local ca_file="/etc/ssh/collei-ca.pub"
+        if [[ -f "$ca_file" ]]; then
+            rm -f "$ca_file"
+            info "已删除 ${ca_file}"
+        fi
+
+        # 从 sshd_config 移除 TrustedUserCAKeys 行
+        if grep -q "TrustedUserCAKeys /etc/ssh/collei-ca.pub" /etc/ssh/sshd_config 2>/dev/null; then
+            sed -i '\|TrustedUserCAKeys /etc/ssh/collei-ca.pub|d' /etc/ssh/sshd_config
+            info "已从 sshd_config 移除 TrustedUserCAKeys"
+
+            # 重载 sshd
+            if systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; then
+                info "sshd 已重载"
+            else
+                warn "无法自动重载 sshd，请手动执行: systemctl reload sshd"
+            fi
+        else
+            info "sshd_config 中未找到 Collei CA 配置，跳过"
+        fi
+    fi
+
+    echo ""
+    echo "============================================"
+    info "Collei Agent 卸载完成！"
+    echo "============================================"
+    echo ""
+}
+
 # ======================== 安装主流程 ========================
 
 do_install() {
@@ -622,6 +709,9 @@ main() {
         update-ca)
             detect_downloader
             do_update_ca
+            ;;
+        uninstall)
+            do_uninstall
             ;;
         *)
             error "未知命令: $COMMAND"
