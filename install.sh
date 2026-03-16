@@ -38,6 +38,10 @@ COMMAND="install"
 
 GITHUB_REPO="collei-monitor/collei-agent"
 BINARY_NAME="collei-agent"
+CA_FILE="/etc/ssh/collei-ca.pub"
+SSHD_CONFIG="/etc/ssh/sshd_config"
+SSHD_MATCH_START="# BEGIN COLLEI AGENT SSH CA"
+SSHD_MATCH_END="# END COLLEI AGENT SSH CA"
 
 # ======================== 颜色输出 ========================
 RED='\033[0;31m'
@@ -146,6 +150,62 @@ check_in_path() {
         warn "$dir 不在 \$PATH 中，你可能需要手动添加："
         warn "  export PATH=\"$dir:\$PATH\""
     fi
+}
+
+backup_sshd_config() {
+    local backup_file="$1"
+    cp "$SSHD_CONFIG" "$backup_file"
+}
+
+validate_sshd_config() {
+    if ! command -v sshd &>/dev/null; then
+        error "未找到 sshd，无法校验 SSH 配置"
+        return 1
+    fi
+
+    sshd -t -f "$SSHD_CONFIG"
+}
+
+reload_sshd_service() {
+    if systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; then
+        info "sshd 已重载"
+    else
+        warn "无法重载 sshd，请手动执行: systemctl reload sshd"
+    fi
+}
+
+cleanup_collei_sshd_config() {
+    sed -i "\|^TrustedUserCAKeys ${CA_FILE}$|d" "$SSHD_CONFIG"
+
+    if grep -qF "$SSHD_MATCH_START" "$SSHD_CONFIG" 2>/dev/null; then
+        sed -i "/^${SSHD_MATCH_START}$/,/^${SSHD_MATCH_END}$/d" "$SSHD_CONFIG"
+    fi
+}
+
+configure_sshd_ca_match() {
+    local backup_file
+    backup_file=$(mktemp)
+    backup_sshd_config "$backup_file"
+
+    cleanup_collei_sshd_config
+
+    cat >> "$SSHD_CONFIG" <<EOF
+
+${SSHD_MATCH_START}
+Match Address 127.0.0.1,::1
+    TrustedUserCAKeys ${CA_FILE}
+${SSHD_MATCH_END}
+EOF
+
+    if ! validate_sshd_config; then
+        cp "$backup_file" "$SSHD_CONFIG"
+        rm -f "$backup_file"
+        error "sshd 配置校验失败，已恢复原配置"
+        return 1
+    fi
+
+    rm -f "$backup_file"
+    return 0
 }
 
 # ======================== SSH 端口检测 ========================
@@ -361,27 +421,17 @@ setup_ca_trust() {
         return 1
     fi
 
-    local ca_file="/etc/ssh/collei-ca.pub"
+    echo "$pub_key" > "$CA_FILE"
+    chmod 644 "$CA_FILE"
+    info "CA 公钥已写入 ${CA_FILE}"
 
-    # 写入公钥（带 from= 限制）
-    echo "cert-authority,from=\"127.0.0.1,::1\" ${pub_key}" > "$ca_file"
-    chmod 644 "$ca_file"
-    info "CA 公钥已写入 ${ca_file}"
-
-    # 配置 sshd TrustedUserCAKeys（幂等）
-    if ! grep -q "TrustedUserCAKeys ${ca_file}" /etc/ssh/sshd_config 2>/dev/null; then
-        echo "TrustedUserCAKeys ${ca_file}" >> /etc/ssh/sshd_config
-        info "已添加 TrustedUserCAKeys 到 sshd_config"
+    if configure_sshd_ca_match; then
+        info "已更新 sshd 配置，仅允许 localhost 使用该 CA"
     else
-        info "TrustedUserCAKeys 已存在，跳过"
+        return 1
     fi
 
-    # 重载 sshd
-    if systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; then
-        info "sshd 已重载"
-    else
-        warn "无法重载 sshd，请手动执行: systemctl reload sshd"
-    fi
+    reload_sshd_service
 
     return 0
 }
@@ -546,26 +596,24 @@ do_update_ca() {
         exit 1
     fi
 
-    local ca_file="/etc/ssh/collei-ca.pub"
-
     # 写入当前公钥（覆盖）
-    echo "cert-authority,from=\"127.0.0.1,::1\" ${pub}" > "$ca_file"
+    echo "$pub" > "$CA_FILE"
 
     # 过渡期：追加旧公钥
     if [[ -n "$old_pub" ]]; then
-        echo "cert-authority,from=\"127.0.0.1,::1\" ${old_pub}" >> "$ca_file"
+        echo "$old_pub" >> "$CA_FILE"
         info "检测到密钥轮换过渡期，已同时写入新旧公钥"
     fi
 
-    chmod 644 "$ca_file"
-    info "CA 公钥已更新: ${ca_file}"
+    chmod 644 "$CA_FILE"
+    info "CA 公钥已更新: ${CA_FILE}"
 
-    # 重载 sshd
-    if systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; then
-        info "sshd 已重载"
-    else
-        warn "无法自动重载 sshd，请手动执行: systemctl reload sshd"
+    if ! validate_sshd_config; then
+        error "当前 sshd 配置校验失败，已停止自动重载"
+        exit 1
     fi
+
+    reload_sshd_service
 
     info "CA 公钥更新完成"
 }
@@ -621,23 +669,27 @@ do_uninstall() {
     if is_root; then
         step "清除 SSH CA 配置..."
 
-        local ca_file="/etc/ssh/collei-ca.pub"
-        if [[ -f "$ca_file" ]]; then
-            rm -f "$ca_file"
-            info "已删除 ${ca_file}"
+        if [[ -f "$CA_FILE" ]]; then
+            rm -f "$CA_FILE"
+            info "已删除 ${CA_FILE}"
         fi
 
-        # 从 sshd_config 移除 TrustedUserCAKeys 行
-        if grep -q "TrustedUserCAKeys /etc/ssh/collei-ca.pub" /etc/ssh/sshd_config 2>/dev/null; then
-            sed -i '\|TrustedUserCAKeys /etc/ssh/collei-ca.pub|d' /etc/ssh/sshd_config
-            info "已从 sshd_config 移除 TrustedUserCAKeys"
+        if grep -qF "$SSHD_MATCH_START" "$SSHD_CONFIG" 2>/dev/null || grep -q "^TrustedUserCAKeys ${CA_FILE}$" "$SSHD_CONFIG" 2>/dev/null; then
+            local backup_file
+            backup_file=$(mktemp)
+            backup_sshd_config "$backup_file"
 
-            # 重载 sshd
-            if systemctl reload sshd 2>/dev/null || systemctl reload ssh 2>/dev/null; then
-                info "sshd 已重载"
+            cleanup_collei_sshd_config
+
+            if validate_sshd_config; then
+                info "已从 sshd_config 移除 Collei CA 配置"
+                reload_sshd_service
             else
-                warn "无法自动重载 sshd，请手动执行: systemctl reload sshd"
+                cp "$backup_file" "$SSHD_CONFIG"
+                error "sshd 配置校验失败，已恢复原配置"
             fi
+
+            rm -f "$backup_file"
         else
             info "sshd_config 中未找到 Collei CA 配置，跳过"
         fi
