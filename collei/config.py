@@ -32,6 +32,14 @@ DEFAULT_CONFIG_PATH = DEFAULT_CONFIG_DIR / "agent.yaml"
 
 
 @dataclass
+class SSHConfig:
+    """SSH 隧道相关配置"""
+    enabled: bool = False      # 是否启用 Web SSH 隧道功能
+    port: int = 22             # sshd 监听端口（安装时自动检测）
+    ca_configured: bool = False  # 是否已配置 SSH CA 信任
+
+
+@dataclass
 class AgentConfig:
     """Agent 本地持久化配置"""
 
@@ -39,6 +47,9 @@ class AgentConfig:
     uuid: str = ""
     token: str = ""
     network_interface: str = ""  # 指定监测网卡名称（为空则使用全部网卡汇总）
+
+    # SSH 隧道配置
+    ssh: SSHConfig = field(default_factory=SSHConfig)
 
     # --- 运行时参数（不持久化） ---
     reg_token: str = field(default="", repr=False)
@@ -56,7 +67,14 @@ class AgentConfig:
 
     def to_yaml_dict(self) -> dict:
         """仅导出需要持久化的字段"""
-        return {k: getattr(self, k) for k in self._PERSISTENT_KEYS if getattr(self, k)}
+        d = {k: getattr(self, k) for k in self._PERSISTENT_KEYS if getattr(self, k)}
+        if self.ssh.enabled:
+            d["ssh"] = {
+                "enabled": self.ssh.enabled,
+                "port": self.ssh.port,
+                "ca_configured": self.ssh.ca_configured,
+            }
+        return d
 
     def is_registered(self) -> bool:
         """是否已完成注册（本地存有 token）"""
@@ -84,6 +102,14 @@ class AgentConfig:
             cfg.uuid = data.get("uuid", "")
             cfg.token = data.get("token", "")
             cfg.network_interface = data.get("network_interface", "")
+            # 加载 SSH 配置
+            ssh_data = data.get("ssh")
+            if isinstance(ssh_data, dict):
+                cfg.ssh = SSHConfig(
+                    enabled=ssh_data.get("enabled", False),
+                    port=ssh_data.get("port", 22),
+                    ca_configured=ssh_data.get("ca_configured", False),
+                )
             logger.info("已加载配置文件 %s", p)
         else:
             logger.info("配置文件不存在: %s，将使用默认配置", p)

@@ -4,13 +4,13 @@ Collei Agent - 轻量级服务器监控探针
 
 用法:
     # 自动注册（全局密钥模式）
-    python agent.py run --url https://api.collei.com --reg-token kfcfkxqsvw50
+    python agent.py run --url https://api.example.com --reg-token kfcfkxqsvw50
 
     # 强制重新注册（覆盖本地已有配置）
-    python agent.py run --url https://api.collei.com --reg-token kfcfkxqsvw50 --force
+    python agent.py run --url https://api.example.com --reg-token kfcfkxqsvw50 --force
   
     # 被动注册（管理员下发 token）
-    python agent.py run --url https://api.collei.com --token <专属token>
+    python agent.py run --url https://api.example.com --token <专属token>
 
     # 使用已有配置文件启动
     python agent.py run --config /etc/collei-agent/agent.yaml

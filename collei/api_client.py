@@ -76,6 +76,7 @@ class ReportResponse:
     is_approved: int
     received: bool
     network_dispatch: Optional[dict] = None
+    ssh_tunnel: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +186,7 @@ class ColleiApiClient:
             is_approved=data.get("is_approved", 1),
             received=data.get("received", False),
             network_dispatch=data.get("network_dispatch"),
+            ssh_tunnel=data.get("ssh_tunnel"),
         )
 
     # ---- HTTP 层 ----

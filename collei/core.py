@@ -56,6 +56,7 @@ class ColleiAgent:
         self._stop_event = threading.Event()
 
         self._api: Optional[ColleiApiClient] = None
+        self._ssh_manager = None  # SSHTunnelManager（延迟初始化）
         state_dir = str(Path(config.config_path).parent) if config.config_path else str(DEFAULT_CONFIG_DIR)
         self._collector = SystemCollector(
             network_interface=config.network_interface,
@@ -294,6 +295,7 @@ class ColleiAgent:
                         load.cpu, load.ram, load.net_in, load.net_out,
                     )
                 self._network.handle_dispatch(resp.network_dispatch)
+                self._handle_ssh_tunnel(resp.ssh_tunnel)
                 self._backoff.reset()
 
             except ServerNotApproved:
@@ -353,11 +355,44 @@ class ColleiAgent:
         """清理资源"""
         self.state = AgentState.STOPPED
         self._network.stop()
+        if self._ssh_manager is not None:
+            self._ssh_manager.stop()
+            self._ssh_manager = None
         if self._api:
             self._api.close()
             self._api = None
         logger.info("Agent 已停止")
 
+
+# ---------------------------------------------------------------------------
+# SSH 隧道处理
+# ---------------------------------------------------------------------------
+
+    def _handle_ssh_tunnel(self, ssh_tunnel: Optional[dict]) -> None:
+        """
+        根据 report 响应中的 ssh_tunnel 字段管理 SSH 隧道连接。
+
+        - ssh_tunnel.connect = true  → 建立隧道 WS
+        - ssh_tunnel.connect = false → 断开隧道 WS
+        - ssh_tunnel = null          → 维持现状
+        """
+        if not self.config.ssh.enabled or ssh_tunnel is None:
+            return
+
+        connect = ssh_tunnel.get("connect")
+
+        if connect is True:
+            if self._ssh_manager is None:
+                from collei.ssh_tunnel import SSHTunnelManager
+                self._ssh_manager = SSHTunnelManager(
+                    api_url=self.config.server_url,
+                    token=self.config.token,
+                    ssh_port=self.config.ssh.port,
+                )
+            self._ssh_manager.connect()
+        elif connect is False:
+            if self._ssh_manager is not None:
+                self._ssh_manager.disconnect()
 
 # ---------------------------------------------------------------------------
 # 工具
