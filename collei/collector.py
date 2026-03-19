@@ -86,6 +86,7 @@ class SystemCollector:
         self._net_state_file = os.path.join(state_dir, "net_state.json") if state_dir else ""
         self._prev_net: Optional[tuple[int, int]] = self._load_net_state()
         self._current_net: Optional[tuple[int, int]] = None  # 最近一次采集时的系统读数
+        self._prev_net_time: Optional[float] = None  # 上次网络基准时间戳
         self._last_hw: Optional[dict] = None
 
         # 新增缓存机制
@@ -330,17 +331,23 @@ class SystemCollector:
 
     def _calc_net_speed(self) -> tuple[int, int]:
         """
-        计算网络入站/出站流量增量 (Bytes)。
-        基于系统网卡总读数减去上一次成功上报时的读数。
+        计算网络入站/出站速率 (Bytes/s)。
+        基于系统网卡总读数减去上一次成功上报时的读数，再除以经过的时间。
         上报失败时不更新基准，确保失败期间的流量在下次成功上报时被补齐。
         Agent 重启后从本地文件恢复上次读数；系统重启后若差值为负则以当前值作为增量。
         """
         rx, tx = self._get_net_counters()
+        now = time.monotonic()
         self._current_net = (rx, tx)
 
-        if self._prev_net is None:
+        if self._prev_net is None or self._prev_net_time is None:
             self._prev_net = (rx, tx)
+            self._prev_net_time = now
             self._save_net_state(rx, tx)
+            return 0, 0
+
+        elapsed = now - self._prev_net_time
+        if elapsed <= 0:
             return 0, 0
 
         prev_rx, prev_tx = self._prev_net
@@ -354,7 +361,7 @@ class SystemCollector:
         if net_out < 0:
             net_out = tx
 
-        return net_in, net_out
+        return int(net_in / elapsed), int(net_out / elapsed)
 
     def confirm_net_reported(self) -> None:
         """
@@ -363,6 +370,7 @@ class SystemCollector:
         """
         if self._current_net is not None:
             self._prev_net = self._current_net
+            self._prev_net_time = time.monotonic()
             self._save_net_state(*self._current_net)
 
     def _get_net_counters(self) -> tuple[int, int]:

@@ -9,6 +9,12 @@
 #   或下载后执行:
 #   bash install.sh --url https://api.example.com --reg-token YOUR_TOKEN [OPTIONS]
 #
+# 用法（更新）:
+#   wget -O- https://raw.githubusercontent.com/collei-monitor/collei-agent/main/install.sh | bash -s -- update
+#
+#   指定版本:
+#   bash install.sh update --version v0.1.0
+#
 # 用法（卸载）:
 #   wget -O- https://raw.githubusercontent.com/collei-monitor/collei-agent/main/install.sh | bash -s -- uninstall
 #
@@ -17,6 +23,7 @@
 #
 # 子命令:
 #   install (默认)  安装 Agent
+#   update          更新 Agent 到最新或指定版本
 #   update-ca       更新 SSH CA 公钥（密钥轮换）
 #   uninstall       卸载 Agent 并清理配置
 # ============================================================================
@@ -284,8 +291,13 @@ Collei Agent 一键部署脚本
 
 用法:
   install.sh [install] [OPTIONS]   安装 Agent
+  install.sh update [OPTIONS]      更新 Agent 到最新或指定版本
   install.sh update-ca [OPTIONS]   更新 SSH CA 公钥
   install.sh uninstall [OPTIONS]   卸载 Agent 并清理
+
+update 选项:
+  --version <VER>         指定版本（如 v0.0.2），默认 latest
+  --install-dir <DIR>     二进制安装目录（默认自动检测）
 
 安装选项:
   --url <URL>             控制端 API 地址（必须）
@@ -618,6 +630,132 @@ do_update_ca() {
     info "CA 公钥更新完成"
 }
 
+# ======================== 更新流程 ========================
+
+do_update() {
+    [[ -z "$INSTALL_DIR" ]] && INSTALL_DIR=$(default_install_dir)
+
+    local binary="${INSTALL_DIR}/${BINARY_NAME}"
+
+    echo ""
+    echo "============================================"
+    echo "      Collei Agent 更新"
+    echo "============================================"
+    echo ""
+
+    # 检查当前是否已安装
+    if [[ ! -f "$binary" ]]; then
+        error "未找到已安装的 Agent（${binary}），请先执行 install"
+        exit 1
+    fi
+
+    # 获取当前版本
+    local current_version=""
+    if "$binary" --version &>/dev/null; then
+        current_version=$("$binary" --version 2>/dev/null || echo "未知")
+        info "当前版本: ${current_version}"
+    fi
+
+    detect_downloader
+
+    # 获取目标版本信息
+    step "检测系统架构..."
+    local arch
+    arch=$(detect_arch)
+    local asset_name="collei-agent-linux-${arch}"
+    info "架构: ${arch}"
+
+    step "获取下载地址..."
+    local download_url
+    local target_tag=""
+
+    if [[ "$VERSION" == "latest" ]]; then
+        local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+        local release_info
+        release_info=$(http_get "$api_url") || {
+            error "无法访问 GitHub API，请检查网络连接"
+            exit 1
+        }
+
+        download_url=$(echo "$release_info" | grep -o '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*'"${asset_name}"'[^"]*"' | sed 's/"browser_download_url"[[:space:]]*:[[:space:]]*"//;s/"$//')
+
+        if [[ -z "$download_url" ]]; then
+            error "未找到架构 ${arch} 的发布文件"
+            exit 1
+        fi
+
+        target_tag=$(json_extract "$release_info" "tag_name")
+        info "目标版本: ${target_tag}"
+    else
+        target_tag="$VERSION"
+        download_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${asset_name}"
+        info "目标版本: ${target_tag}"
+    fi
+
+    # 检查是否与当前版本相同
+    if [[ -n "$current_version" && "$current_version" == "$target_tag" ]]; then
+        info "当前已是最新版本（${target_tag}），无需更新"
+        return
+    fi
+
+    # 停止服务
+    local service_was_running=false
+    if is_root && command -v systemctl &>/dev/null; then
+        if systemctl is-active collei-agent &>/dev/null; then
+            step "停止 Agent 服务..."
+            systemctl stop collei-agent
+            service_was_running=true
+            info "服务已停止"
+        fi
+    fi
+
+    # 下载新版本
+    step "下载新版本..."
+    local tmp_file
+    tmp_file=$(mktemp)
+    http_download "$download_url" "$tmp_file" || {
+        rm -f "$tmp_file"
+        # 下载失败时尝试恢复服务
+        if [[ "$service_was_running" == true ]]; then
+            warn "下载失败，正在恢复服务..."
+            systemctl start collei-agent
+        fi
+        error "下载失败，请检查网络或版本号是否正确"
+        exit 1
+    }
+
+    # 替换二进制文件
+    step "替换二进制文件..."
+    mv "$tmp_file" "$binary"
+    chmod +x "$binary"
+    info "已更新 ${binary}"
+
+    # 重启服务
+    if is_root && command -v systemctl &>/dev/null; then
+        if [[ "$service_was_running" == true ]] || systemctl is-enabled collei-agent &>/dev/null; then
+            step "启动 Agent 服务..."
+            systemctl start collei-agent
+            info "服务已启动"
+        fi
+    fi
+
+    # 显示新版本
+    local new_version=""
+    if "$binary" --version &>/dev/null; then
+        new_version=$("$binary" --version 2>/dev/null || echo "未知")
+    fi
+
+    echo ""
+    echo "============================================"
+    if [[ -n "$new_version" ]]; then
+        info "Collei Agent 已更新: ${current_version:-未知} → ${new_version}"
+    else
+        info "Collei Agent 更新完成！"
+    fi
+    echo "============================================"
+    echo ""
+}
+
 # ======================== 卸载流程 ========================
 
 do_uninstall() {
@@ -763,6 +901,9 @@ main() {
     case "$COMMAND" in
         install)
             do_install
+            ;;
+        update)
+            do_update
             ;;
         update-ca)
             detect_downloader
