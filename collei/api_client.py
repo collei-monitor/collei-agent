@@ -69,6 +69,7 @@ class ReportResponse:
     received: bool
     network_dispatch: Optional[dict] = None
     ssh_tunnel: Optional[dict] = None
+    pending_tasks: Optional[list[dict]] = None
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +180,30 @@ class ColleiApiClient:
             received=data.get("received", False),
             network_dispatch=data.get("network_dispatch"),
             ssh_tunnel=data.get("ssh_tunnel"),
+            pending_tasks=data.get("pending_tasks"),
         )
+
+    def report_task(
+        self,
+        execution_id: str,
+        status: str,
+        exit_code: Optional[int] = None,
+        output: Optional[str] = None,
+    ) -> None:
+        """
+        上报任务执行结果
+        POST /api/v1/agent/tasks/report
+        """
+        payload: dict[str, Any] = {
+            "execution_id": execution_id,
+            "status": status,
+        }
+        if exit_code is not None:
+            payload["exit_code"] = exit_code
+        if output is not None:
+            payload["output"] = output
+
+        self._post(f"{self._agent_base}/tasks/report", payload)
 
     # ---- HTTP 层 ----
 

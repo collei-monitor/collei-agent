@@ -27,6 +27,7 @@ from collei.api_client import (
 from collei.collector import SystemCollector
 from collei.config import AgentConfig, DEFAULT_CONFIG_DIR
 from collei.network_monitor import NetworkMonitor
+from collei.task_executor import TaskExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ class ColleiAgent:
 
         self._api: Optional[ColleiApiClient] = None
         self._ssh_manager = None  # SSHTunnelManager（延迟初始化）
+        self._task_executor: Optional[TaskExecutor] = None
         state_dir = str(Path(config.config_path).parent) if config.config_path else str(DEFAULT_CONFIG_DIR)
         self._collector = SystemCollector(
             network_interface=config.network_interface,
@@ -74,6 +76,7 @@ class ColleiAgent:
         logger.info("控制端: %s", self.config.server_url)
 
         self._api = ColleiApiClient(self.config.server_url)
+        self._task_executor = TaskExecutor(self._api)
 
         try:
             self._main_loop()
@@ -291,6 +294,8 @@ class ColleiAgent:
                     )
                 self._network.handle_dispatch(resp.network_dispatch)
                 self._handle_ssh_tunnel(resp.ssh_tunnel)
+                if self._task_executor is not None:
+                    self._task_executor.handle_pending_tasks(resp.pending_tasks)
 
             except ServerNotApproved:
                 logger.warning("服务器审批状态已变更，回退至等待模式")
@@ -349,6 +354,9 @@ class ColleiAgent:
         """清理资源"""
         self.state = AgentState.STOPPED
         self._network.stop()
+        if self._task_executor is not None:
+            self._task_executor.shutdown()
+            self._task_executor = None
         if self._ssh_manager is not None:
             self._ssh_manager.stop()
             self._ssh_manager = None
