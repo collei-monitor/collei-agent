@@ -137,10 +137,22 @@ class ColleiAgent:
         while self._running:
             try:
                 if self.config.force_register and self.config.reg_token:
-                    # 强制重新注册模式
-                    logger.info("强制重新注册模式已启用，将覆盖本地配置")
-                    self._do_register()
-                    return
+                    if self.config.is_registered():
+                        # 已有本地配置：先尝试验证，验证失败再重新注册
+                        # 防止 systemd 重启时 --force 导致重复注册
+                        logger.info("检测到 --force，但本地已有注册信息，先尝试验证...")
+                        try:
+                            self._do_verify()
+                            return
+                        except TokenInvalid:
+                            logger.warning("本地 Token 已失效，将强制重新注册")
+                            self._do_register()
+                            return
+                    else:
+                        # 无本地配置：直接注册
+                        logger.info("强制重新注册模式已启用")
+                        self._do_register()
+                        return
                 elif self.config.is_registered():
                     # 本地已有配置，验证身份
                     self._do_verify()

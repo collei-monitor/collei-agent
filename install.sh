@@ -519,9 +519,10 @@ create_systemd_service() {
     if [[ -n "$INTERVAL" ]]; then
         exec_cmd+=" --interval ${INTERVAL}"
     fi
-    if [[ "$FORCE" == true ]]; then
-        exec_cmd+=" --force"
-    fi
+    # 注意: 不将 --force 写入 ExecStart
+    # --force 仅用于首次安装时强制注册，不应在每次服务重启时生效
+    # 否则 Agent 每次重启（含 update-ca 触发的 sshd reload 导致的间接重启）
+    # 都会重新注册并创建重复的服务器记录
 
     cat > "$service_file" <<SERVICEEOF
 [Unit]
