@@ -73,6 +73,7 @@ type Manager struct {
 	wanted    bool
 	connected bool
 	stopCh    chan struct{} // 通知隧道协程停止的信号
+	doneCh    chan struct{} // maintainTunnel 退出时关闭，用于探测协程是否已结束
 }
 
 // NewManager 创建一个新的 SSH 隧道管理器。
@@ -145,9 +146,9 @@ func (m *Manager) signalStop() {
 
 func (m *Manager) startLoop() {
 	m.mu.Lock()
-	if m.stopCh != nil {
+	if m.doneCh != nil {
 		select {
-		case <-m.stopCh:
+		case <-m.doneCh:
 			// 上一个协程已停止
 		default:
 			m.mu.Unlock()
@@ -155,6 +156,7 @@ func (m *Manager) startLoop() {
 		}
 	}
 	m.stopCh = make(chan struct{})
+	m.doneCh = make(chan struct{})
 	m.mu.Unlock()
 
 	go m.maintainTunnel()
@@ -184,6 +186,7 @@ func (m *Manager) maintainTunnel() {
 	defer func() {
 		m.mu.Lock()
 		m.connected = false
+		close(m.doneCh)
 		m.mu.Unlock()
 		slog.Info("SSH tunnel: exited")
 	}()
