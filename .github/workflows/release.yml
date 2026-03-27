@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
         include:
@@ -27,19 +27,17 @@ jobs:
         if: matrix.arch == 'arm64'
         uses: docker/setup-qemu-action@v3
 
-      - name: Set up Python (for AMD64)
-        if: matrix.arch == 'amd64'
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.13"
-
       - name: Build AMD64 Binary
         if: matrix.arch == 'amd64'
         run: |
-          sudo apt-get update && sudo apt-get install -y binutils
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller setuptools
-          pyinstaller --onefile --name ${{ matrix.name }} agent.py
+          docker run --rm -v ${{ github.workspace }}:/workspace \
+            python:3.13-slim-bullseye \
+            bash -c "apt-get update && apt-get install -y binutils && \
+            cd /workspace && \
+            pip install --upgrade pip && \
+            pip install -r requirements.txt pyinstaller setuptools && \
+            pyinstaller --onefile --name ${{ matrix.name }} agent.py && \
+            chown -R $(id -u):$(id -g) dist build *.spec"
 
       - name: Build ARM64 Binary
         if: matrix.arch == 'arm64'
