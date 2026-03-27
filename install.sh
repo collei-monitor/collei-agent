@@ -9,6 +9,11 @@
 #   或下载后执行:
 #   bash install.sh --url https://api.example.com --reg-token YOUR_TOKEN [OPTIONS]
 #
+# 下载策略:
+#   安装/更新时优先通过面板代理下载 (GET /api/v1/agent/download)，
+#   若代理失败则自动回退到 GitHub Releases 直接下载。
+#   这允许无法访问 GitHub 的机器通过面板中转获取 Agent 二进制。
+#
 # 用法（更新）:
 #   wget -O- https://raw.githubusercontent.com/collei-monitor/collei-agent/main/install.sh | bash -s -- update
 #
@@ -99,6 +104,33 @@ http_download() {
     else
         curl -sfL --connect-timeout 30 -o "$dest" "$url"
     fi
+}
+
+# 通过面板代理下载 Agent 二进制（成功返回 0，失败返回 1）
+try_proxy_download() {
+    local dest="$1"
+    local arch="$2"
+    local panel_url="$3"
+    local auth_token="$4"
+
+    if [[ -z "$panel_url" || -z "$auth_token" ]]; then
+        return 1
+    fi
+
+    local proxy_url="${panel_url}/api/v1/agent/download?token=${auth_token}&arch=${arch}"
+    info "尝试通过面板代理下载..."
+
+    if http_download "$proxy_url" "$dest" 2>/dev/null; then
+        # 检查下载的文件是否有效（非空且不是 HTML 错误页）
+        if [[ -s "$dest" ]] && ! head -c 20 "$dest" | grep -qi '<!doctype\|<html\|{"detail"'; then
+            info "通过面板代理下载成功"
+            return 0
+        fi
+    fi
+
+    warn "面板代理下载失败，将回退到 GitHub 下载"
+    rm -f "$dest"
+    return 1
 }
 
 # 从 JSON 中提取字段值（无 jq 的备选方案）
@@ -364,42 +396,54 @@ download_and_install() {
     local asset_name="collei-agent-linux-${arch}"
     info "架构: ${arch}"
 
-    step "获取下载地址..."
-    local download_url
-
-    if [[ "$VERSION" == "latest" ]]; then
-        # 获取最新版本
-        local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
-        local release_info
-        release_info=$(http_get "$api_url") || {
-            error "无法访问 GitHub API，请检查网络连接"
-            exit 1
-        }
-
-        download_url=$(echo "$release_info" | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*${asset_name}[^\"]*\"" | sed 's/"browser_download_url"[[:space:]]*:[[:space:]]*"//;s/"$//')
-
-        if [[ -z "$download_url" ]]; then
-            error "未找到架构 ${arch} 的发布文件"
-            exit 1
-        fi
-
-        local tag
-        tag=$(json_extract "$release_info" "tag_name")
-        info "最新版本: ${tag}"
-    else
-        download_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${asset_name}"
-    fi
-
-    step "下载 Agent 二进制文件..."
-    info "下载地址: ${download_url}"
-
     local tmp_file
     tmp_file=$(mktemp)
-    http_download "$download_url" "$tmp_file" || {
-        rm -f "$tmp_file"
-        error "下载失败，请检查网络或版本号是否正确"
-        exit 1
-    }
+
+    # 优先尝试通过面板代理下载
+    local auth_token="${REG_TOKEN:-${TOKEN:-}}"
+    local proxy_ok=false
+    if try_proxy_download "$tmp_file" "$arch" "$COLLEI_URL" "$auth_token"; then
+        proxy_ok=true
+    fi
+
+    # 代理失败时回退到 GitHub
+    if [[ "$proxy_ok" == false ]]; then
+        step "从 GitHub 获取下载地址..."
+        local download_url
+
+        if [[ "$VERSION" == "latest" ]]; then
+            local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+            local release_info
+            release_info=$(http_get "$api_url") || {
+                rm -f "$tmp_file"
+                error "无法访问 GitHub API，请检查网络连接"
+                exit 1
+            }
+
+            download_url=$(echo "$release_info" | grep -o "\"browser_download_url\"[[:space:]]*:[[:space:]]*\"[^\"]*${asset_name}[^\"]*\"" | sed 's/"browser_download_url"[[:space:]]*:[[:space:]]*"//;s/"$//')
+
+            if [[ -z "$download_url" ]]; then
+                rm -f "$tmp_file"
+                error "未找到架构 ${arch} 的发布文件"
+                exit 1
+            fi
+
+            local tag
+            tag=$(json_extract "$release_info" "tag_name")
+            info "最新版本: ${tag}"
+        else
+            download_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${asset_name}"
+        fi
+
+        step "从 GitHub 下载 Agent 二进制文件..."
+        info "下载地址: ${download_url}"
+
+        http_download "$download_url" "$tmp_file" || {
+            rm -f "$tmp_file"
+            error "下载失败，请检查网络或版本号是否正确"
+            exit 1
+        }
+    fi
 
     # 安装到目标路径
     mkdir -p "$INSTALL_DIR"
@@ -710,20 +754,43 @@ do_update() {
         fi
     fi
 
-    # 下载新版本
+    # 下载新版本：优先试面板代理，失败回退 GitHub
     step "下载新版本..."
     local tmp_file
     tmp_file=$(mktemp)
-    http_download "$download_url" "$tmp_file" || {
-        rm -f "$tmp_file"
-        # 下载失败时尝试恢复服务
-        if [[ "$service_was_running" == true ]]; then
-            warn "下载失败，正在恢复服务..."
-            systemctl start collei-agent
-        fi
-        error "下载失败，请检查网络或版本号是否正确"
-        exit 1
-    }
+
+    # 从 agent.yaml 读取面板地址和 token
+    local panel_url=""
+    local auth_token=""
+    local config_file=""
+    if [[ -f "/etc/collei-agent/agent.yaml" ]]; then
+        config_file="/etc/collei-agent/agent.yaml"
+    elif [[ -f "${HOME}/.config/collei-agent/agent.yaml" ]]; then
+        config_file="${HOME}/.config/collei-agent/agent.yaml"
+    fi
+    if [[ -n "$config_file" ]]; then
+        panel_url=$(grep 'server_url:' "$config_file" | awk '{print $2}')
+        panel_url="${panel_url%/}"
+        auth_token=$(grep 'token:' "$config_file" | head -1 | awk '{print $2}')
+    fi
+
+    local proxy_ok=false
+    if try_proxy_download "$tmp_file" "$arch" "$panel_url" "$auth_token"; then
+        proxy_ok=true
+    fi
+
+    if [[ "$proxy_ok" == false ]]; then
+        http_download "$download_url" "$tmp_file" || {
+            rm -f "$tmp_file"
+            # 下载失败时尝试恢复服务
+            if [[ "$service_was_running" == true ]]; then
+                warn "下载失败，正在恢复服务..."
+                systemctl start collei-agent
+            fi
+            error "下载失败，请检查网络或版本号是否正确"
+            exit 1
+        }
+    fi
 
     # 替换二进制文件
     step "替换二进制文件..."
