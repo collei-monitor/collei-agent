@@ -2,17 +2,21 @@
 # ============================================================================
 # Collei Agent 一键部署脚本
 #
-# 用法（安装）:
+# 用法（安装 — 从 GitHub 直连）:
 #   wget -O- https://raw.githubusercontent.com/collei-monitor/collei-agent/main/install.sh | bash -s -- \
 #       --url https://api.example.com --reg-token YOUR_TOKEN
+#
+# 用法（安装 — 通过面板中转）:
+#   curl -fsSL 'https://panel.example.com/api/v1/agent/install-script?token=TOKEN' | bash -s -- \
+#       --url https://panel.example.com --reg-token TOKEN --proxy-download
 #
 #   或下载后执行:
 #   bash install.sh --url https://api.example.com --reg-token YOUR_TOKEN [OPTIONS]
 #
 # 下载策略:
-#   安装/更新时优先通过面板代理下载 (GET /api/v1/agent/download)，
-#   若代理失败则自动回退到 GitHub Releases 直接下载。
-#   这允许无法访问 GitHub 的机器通过面板中转获取 Agent 二进制。
+#   默认从 GitHub Releases 直接下载 Agent 二进制。
+#   指定 --proxy-download 时，通过面板代理端点 (GET /api/v1/agent/download) 下载，
+#   适用于目标机器无法访问 GitHub 的场景。
 #
 # 用法（更新）:
 #   wget -O- https://raw.githubusercontent.com/collei-monitor/collei-agent/main/install.sh | bash -s -- update
@@ -43,6 +47,7 @@ INTERVAL=""
 ENABLE_SSH=false
 SETUP_CA=false
 FORCE=false
+PROXY_DOWNLOAD=false
 INSTALL_DIR=""
 CONFIG_DIR=""
 VERSION="latest"
@@ -297,6 +302,8 @@ parse_args() {
                 SETUP_CA=true; shift ;;
             --force)
                 FORCE=true; shift ;;
+            --proxy-download)
+                PROXY_DOWNLOAD=true; shift ;;
             --install-dir)
                 INSTALL_DIR="$2"; shift 2 ;;
             --config-dir)
@@ -330,6 +337,7 @@ Collei Agent 一键部署脚本
 update 选项:
   --version <VER>         指定版本（如 v0.0.2），默认 latest
   --install-dir <DIR>     二进制安装目录（默认自动检测）
+  --proxy-download        通过面板代理下载（而非直连 GitHub）
 
 安装选项:
   --url <URL>             控制端 API 地址（必须）
@@ -340,6 +348,7 @@ update 选项:
   --enable-ssh            启用 Web SSH 隧道
   --setup-ca              配置 SSH CA 免密登录（需 root，需搭配 --enable-ssh）
   --force                 强制重新注册
+  --proxy-download        通过面板代理下载 Agent 二进制（而非直连 GitHub）
   --install-dir <DIR>     二进制安装目录
   --config-dir <DIR>      配置文件目录
   --version <VER>         指定版本（如 v0.0.2），默认 latest
@@ -399,15 +408,22 @@ download_and_install() {
     local tmp_file
     tmp_file=$(mktemp)
 
-    # 优先尝试通过面板代理下载
-    local auth_token="${REG_TOKEN:-${TOKEN:-}}"
-    local proxy_ok=false
-    if try_proxy_download "$tmp_file" "$arch" "$COLLEI_URL" "$auth_token"; then
-        proxy_ok=true
+    local downloaded=false
+
+    # 仅在指定 --proxy-download 时通过面板代理下载
+    if [[ "$PROXY_DOWNLOAD" == true ]]; then
+        local auth_token="${REG_TOKEN:-${TOKEN:-}}"
+        if try_proxy_download "$tmp_file" "$arch" "$COLLEI_URL" "$auth_token"; then
+            downloaded=true
+        else
+            rm -f "$tmp_file"
+            error "面板代理下载失败，请检查面板是否已配置 agent_url"
+            exit 1
+        fi
     fi
 
-    # 代理失败时回退到 GitHub
-    if [[ "$proxy_ok" == false ]]; then
+    # 默认从 GitHub 下载
+    if [[ "$downloaded" == false ]]; then
         step "从 GitHub 获取下载地址..."
         local download_url
 
@@ -445,7 +461,7 @@ download_and_install() {
         }
     fi
 
-    # 安装到目标路径
+    # 安装到目标路径 (proxy_download 和 github 两条路径都会到达此处)
     mkdir -p "$INSTALL_DIR"
     local target="${INSTALL_DIR}/${BINARY_NAME}"
 
@@ -711,10 +727,14 @@ do_update() {
     info "架构: ${arch}"
 
     step "获取下载地址..."
-    local download_url
+    local download_url=""
     local target_tag=""
 
-    if [[ "$VERSION" == "latest" ]]; then
+    # 使用面板代理时跳过 GitHub API 查询（目标机器可能无法访问 GitHub）
+    if [[ "$PROXY_DOWNLOAD" == true ]]; then
+        target_tag="$VERSION"
+        info "使用面板代理下载（版本: ${target_tag}）"
+    elif [[ "$VERSION" == "latest" ]]; then
         local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
         local release_info
         release_info=$(http_get "$api_url") || {
@@ -754,7 +774,7 @@ do_update() {
         fi
     fi
 
-    # 下载新版本：优先试面板代理，失败回退 GitHub
+    # 下载新版本
     step "下载新版本..."
     local tmp_file
     tmp_file=$(mktemp)
@@ -774,15 +794,26 @@ do_update() {
         auth_token=$(grep 'token:' "$config_file" | head -1 | awk '{print $2}')
     fi
 
-    local proxy_ok=false
-    if try_proxy_download "$tmp_file" "$arch" "$panel_url" "$auth_token"; then
-        proxy_ok=true
+    local downloaded=false
+
+    # 仅在指定 --proxy-download 时通过面板代理下载
+    if [[ "$PROXY_DOWNLOAD" == true ]]; then
+        if try_proxy_download "$tmp_file" "$arch" "$panel_url" "$auth_token"; then
+            downloaded=true
+        else
+            rm -f "$tmp_file"
+            if [[ "$service_was_running" == true ]]; then
+                warn "代理下载失败，正在恢复服务..."
+                systemctl start collei-agent
+            fi
+            error "面板代理下载失败，请检查面板是否已配置 agent_url"
+            exit 1
+        fi
     fi
 
-    if [[ "$proxy_ok" == false ]]; then
+    if [[ "$downloaded" == false ]]; then
         http_download "$download_url" "$tmp_file" || {
             rm -f "$tmp_file"
-            # 下载失败时尝试恢复服务
             if [[ "$service_was_running" == true ]]; then
                 warn "下载失败，正在恢复服务..."
                 systemctl start collei-agent
