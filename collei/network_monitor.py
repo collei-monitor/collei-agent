@@ -138,6 +138,25 @@ class NetworkMonitor:
             self._pending_results.clear()
             return results
 
+    def requeue_results(self, results: list[dict]) -> None:
+        """将上报失败的探测结果放回缓冲区头部，下次上报时一并发送。"""
+        if not results:
+            return
+        with self._results_lock:
+            # 还原为 ProbeResult 并插入到头部，保持时间顺序
+            restored = []
+            for d in results:
+                restored.append(ProbeResult(
+                    target_id=d["target_id"],
+                    time=d["time"],
+                    median_latency=d.get("median_latency"),
+                    max_latency=d.get("max_latency"),
+                    min_latency=d.get("min_latency"),
+                    packet_loss=d.get("packet_loss", 0.0),
+                ))
+            self._pending_results = restored + self._pending_results
+            logger.debug("回写 %d 条探测结果到缓冲区", len(results))
+
     # ---- 调度 ----
 
     def _reschedule_probes(self) -> None:

@@ -281,6 +281,7 @@ class ColleiAgent:
         self._interruptible_sleep(min(1.0, self.config.report_interval))
 
         while self._running and self.state == AgentState.REPORTING:
+            network_results: list[dict] = []
             try:
                 # 采集数据
                 load = self._collector.collect_load()
@@ -321,6 +322,7 @@ class ColleiAgent:
 
             except httpx.RequestError as exc:
                 logger.warning("上报失败 (网络): %s", exc)
+                self._network.requeue_results(network_results)
                 self._interruptible_sleep(5.0)
                 continue
 
@@ -330,6 +332,7 @@ class ColleiAgent:
                         "服务端错误 %d (%s)，重试",
                         exc.status_code, exc.detail or "no detail",
                     )
+                    self._network.requeue_results(network_results)
                     self._interruptible_sleep(5.0)
                     continue
                 elif exc.status_code == 429:
@@ -340,9 +343,11 @@ class ColleiAgent:
                     else:
                         logger.warning("请求频率过高，重试")
                         self._interruptible_sleep(5.0)
+                    self._network.requeue_results(network_results)
                     continue
                 else:
                     logger.error("上报异常 %d: %s", exc.status_code, exc.detail)
+                    self._network.requeue_results(network_results)
                     self._interruptible_sleep(5.0)
                     continue
 
