@@ -1,88 +1,22 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
+# Go 构建产物
+collei-agent
+collei-agent-*
+*.exe
 
-# C extensions
-*.so
-
-# Distribution / packaging
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-pip-wheel-metadata/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# Virtual environments
-venv/
-ENV/
-env/
-.env
-.venv/
-venv.bak/
-env.bak/
-
-# Pytest
-.pytest_cache/
-.cache
-
-# Coverage and reports
-.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-coverage.xml
-
-# IDEs and editors
+# IDE
 .vscode/
 .idea/
-*.sublime-project
-*.sublime-workspace
 
-# macOS/Windows
+# 系统文件
 .DS_Store
 Thumbs.db
 
-# Logs and databases
+# 日志
 *.log
-*.sqlite3
-*.db
 
-# Python bytecode
-*.pyc
-
-# mypy
-.mypy_cache/
-
-# pipenv
-Pipfile.lock
-
-# local env and settings
-local_settings.py
-instance/
-
-# celery
-celerybeat-schedule
-
-# node (if any)
-node_modules/
-
-# secrets
+# 密钥
 secrets.json
 secrets/
 
-# other
+# 文档
 markdown/

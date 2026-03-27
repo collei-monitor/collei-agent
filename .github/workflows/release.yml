@@ -1,60 +1,69 @@
-name: Build and Release Agent
+name: Release
 
 on:
   push:
     tags:
-      - "v*"
+      - 'v*'
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - arch: amd64
-            name: collei-agent-linux-amd64
-          - arch: arm64
-            name: collei-agent-linux-arm64
+          - goos: linux
+            goarch: amd64
+            suffix: linux-amd64
+          - goos: linux
+            goarch: arm64
+            suffix: linux-arm64
+          - goos: darwin
+            goarch: amd64
+            suffix: darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            suffix: darwin-arm64
+          - goos: windows
+            goarch: amd64
+            suffix: windows-amd64
+            ext: .exe
 
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Set up QEMU (for ARM64)
-        if: matrix.arch == 'arm64'
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build AMD64 Binary
-        if: matrix.arch == 'amd64'
-        run: |
-          docker run --rm -v ${{ github.workspace }}:/workspace \
-            python:3.13-slim-bullseye \
-            bash -c "apt-get update && apt-get install -y binutils && \
-            cd /workspace && \
-            pip install --upgrade pip && \
-            pip install -r requirements.txt pyinstaller setuptools && \
-            pyinstaller --onefile --name ${{ matrix.name }} agent.py && \
-            chown -R $(id -u):$(id -g) dist build *.spec"
-
-      - name: Build ARM64 Binary
-        if: matrix.arch == 'arm64'
-        run: |
-          docker run --rm -v ${{ github.workspace }}:/workspace \
-            --platform linux/arm64 \
-            python:3.13-slim-bullseye \
-            bash -c "apt-get update && apt-get install -y binutils && \
-            cd /workspace && \
-            pip install --upgrade pip && \
-            pip install -r requirements.txt pyinstaller setuptools && \
-            pyinstaller --onefile --name ${{ matrix.name }} agent.py && \
-            chown -R $(id -u):$(id -g) dist build *.spec"
-
-      - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v1
+      - uses: actions/setup-go@v5
         with:
-          files: dist/${{ matrix.name }}
+          go-version: '1.23'
+
+      - name: Build
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CGO_ENABLED: '0'
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          VERSION=${GITHUB_REF_NAME}
+          go build -ldflags "-s -w -X github.com/collei-monitor/collei-agent/internal/core.Version=${VERSION}" \
+            -o collei-agent-${{ matrix.suffix }}${{ matrix.ext }} .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: collei-agent-${{ matrix.suffix }}
+          path: collei-agent-${{ matrix.suffix }}${{ matrix.ext }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

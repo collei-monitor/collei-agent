@@ -1,0 +1,614 @@
+package collector
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/shirou/gopsutil/v4/cpu"
+	"github.com/shirou/gopsutil/v4/disk"
+	"github.com/shirou/gopsutil/v4/host"
+	"github.com/shirou/gopsutil/v4/load"
+	"github.com/shirou/gopsutil/v4/mem"
+	gnet "github.com/shirou/gopsutil/v4/net"
+	"github.com/shirou/gopsutil/v4/process"
+)
+
+// HardwareInfo 包含服务器静态硬件信息。
+type HardwareInfo struct {
+	CPUName        string `json:"cpu_name,omitempty"`
+	Virtualization string `json:"virtualization,omitempty"`
+	Arch           string `json:"arch,omitempty"`
+	CPUCores       int    `json:"cpu_cores,omitempty"`
+	OS             string `json:"os,omitempty"`
+	KernelVersion  string `json:"kernel_version,omitempty"`
+	IPv4           string `json:"ipv4,omitempty"`
+	IPv6           string `json:"ipv6,omitempty"`
+	MemTotal       int64  `json:"mem_total,omitempty"`
+	SwapTotal      int64  `json:"swap_total,omitempty"`
+	DiskTotal      int64  `json:"disk_total,omitempty"`
+	BootTime       int64  `json:"boot_time,omitempty"`
+}
+
+// ToMap 将 HardwareInfo 转换为 map，过滤零值/空值。
+func (h *HardwareInfo) ToMap() map[string]interface{} {
+	m := make(map[string]interface{})
+	if h.CPUName != "" {
+		m["cpu_name"] = h.CPUName
+	}
+	if h.Virtualization != "" {
+		m["virtualization"] = h.Virtualization
+	}
+	if h.Arch != "" {
+		m["arch"] = h.Arch
+	}
+	if h.CPUCores > 0 {
+		m["cpu_cores"] = h.CPUCores
+	}
+	if h.OS != "" {
+		m["os"] = h.OS
+	}
+	if h.KernelVersion != "" {
+		m["kernel_version"] = h.KernelVersion
+	}
+	if h.IPv4 != "" {
+		m["ipv4"] = h.IPv4
+	}
+	if h.IPv6 != "" {
+		m["ipv6"] = h.IPv6
+	}
+	if h.MemTotal > 0 {
+		m["mem_total"] = h.MemTotal
+	}
+	if h.SwapTotal > 0 {
+		m["swap_total"] = h.SwapTotal
+	}
+	if h.DiskTotal > 0 {
+		m["disk_total"] = h.DiskTotal
+	}
+	if h.BootTime > 0 {
+		m["boot_time"] = h.BootTime
+	}
+	return m
+}
+
+// LoadData 包含实时监控数据。
+type LoadData struct {
+	CPU      float64 `json:"cpu"`
+	RAM      int64   `json:"ram"`
+	RAMTotal int64   `json:"ram_total"`
+	Swap     int64   `json:"swap"`
+	SwapTotal int64  `json:"swap_total"`
+	Load     float64 `json:"load"`
+	Disk     int64   `json:"disk"`
+	DiskTotal int64  `json:"disk_total"`
+	NetIn    int64   `json:"net_in"`
+	NetOut   int64   `json:"net_out"`
+	TCP      int     `json:"tcp"`
+	UDP      int     `json:"udp"`
+	Process  int     `json:"process"`
+}
+
+// ToMap 将 LoadData 转换为 map。
+func (l *LoadData) ToMap() map[string]interface{} {
+	return map[string]interface{}{
+		"cpu":       l.CPU,
+		"ram":       l.RAM,
+		"ram_total": l.RAMTotal,
+		"swap":      l.Swap,
+		"swap_total": l.SwapTotal,
+		"load":      l.Load,
+		"disk":      l.Disk,
+		"disk_total": l.DiskTotal,
+		"net_in":    l.NetIn,
+		"net_out":   l.NetOut,
+		"tcp":       l.TCP,
+		"udp":       l.UDP,
+		"process":   l.Process,
+	}
+}
+
+// SystemCollector 负责采集系统指标。
+type SystemCollector struct {
+	networkInterface string
+	netStateFile     string
+
+	prevNet     *[2]int64 // [rx, tx]
+	currentNet  *[2]int64
+	prevNetTime *float64
+
+	lastHW         map[string]interface{}
+	cachedHW       *HardwareInfo
+	lastHWTime     float64
+	hwCacheTTL     float64
+
+	cpuPercent float64
+	cpuMu      sync.RWMutex
+}
+
+// NewSystemCollector 创建一个新的采集器。
+func NewSystemCollector(networkInterface, stateDir string) *SystemCollector {
+	c := &SystemCollector{
+		networkInterface: networkInterface,
+		hwCacheTTL:       300.0, // 5 minutes
+	}
+	if stateDir != "" {
+		c.netStateFile = filepath.Join(stateDir, "net_state.json")
+	}
+	c.prevNet = c.loadNetState()
+
+	// 启动后台 CPU 采样协程
+	go c.cpuSamplingLoop()
+
+	return c
+}
+
+// CollectHardware 采集完整的硬件信息（带缓存）。
+func (c *SystemCollector) CollectHardware() *HardwareInfo {
+	now := monotonicSeconds()
+
+	if c.cachedHW != nil && (now-c.lastHWTime) < c.hwCacheTTL {
+		return c.cachedHW
+	}
+
+	ctx := context.Background()
+
+	hw := &HardwareInfo{
+		CPUName:        getCPUName(ctx),
+		Virtualization: getVirtualization(),
+		Arch:           getArch(),
+		CPUCores:       getCPUCores(ctx),
+		OS:             getOSName(),
+		KernelVersion:  getKernelVersion(),
+		IPv4:           getIPv4(),
+		IPv6:           getIPv6(),
+		MemTotal:       getMemTotal(ctx),
+		SwapTotal:      getSwapTotal(ctx),
+		DiskTotal:      getDiskTotal(),
+		BootTime:       getBootTime(ctx),
+	}
+
+	c.cachedHW = hw
+	c.lastHWTime = now
+	return hw
+}
+
+// CollectHardwareIfChanged 仅在硬件信息发生变化时返回 map。
+func (c *SystemCollector) CollectHardwareIfChanged() map[string]interface{} {
+	hw := c.CollectHardware().ToMap()
+	if !mapsEqual(hw, c.lastHW) {
+		c.lastHW = hw
+		return hw
+	}
+	return nil
+}
+
+// CollectLoad 采集实时监控指标。
+func (c *SystemCollector) CollectLoad() *LoadData {
+	ctx := context.Background()
+
+	memInfo, _ := mem.VirtualMemoryWithContext(ctx)
+	swapInfo, _ := mem.SwapMemoryWithContext(ctx)
+	diskUsed, diskTotal := getDiskUsage()
+	netIn, netOut := c.calcNetSpeed()
+	tcpCount, udpCount := getConnectionCounts()
+
+	var ramUsed, ramTotal, swapUsed, swapTotal int64
+	if memInfo != nil {
+		ramUsed = int64(memInfo.Total - memInfo.Available)
+		ramTotal = int64(memInfo.Total)
+	}
+	if swapInfo != nil {
+		swapUsed = int64(swapInfo.Used)
+		swapTotal = int64(swapInfo.Total)
+	}
+
+	c.cpuMu.RLock()
+	cpuPct := c.cpuPercent
+	c.cpuMu.RUnlock()
+
+	return &LoadData{
+		CPU:       cpuPct,
+		RAM:       ramUsed,
+		RAMTotal:  ramTotal,
+		Swap:      swapUsed,
+		SwapTotal: swapTotal,
+		Load:      getLoadAvg(),
+		Disk:      diskUsed,
+		DiskTotal: diskTotal,
+		NetIn:     netIn,
+		NetOut:    netOut,
+		TCP:       tcpCount,
+		UDP:       udpCount,
+		Process:   getProcessCount(),
+	}
+}
+
+// CollectTotalFlow 返回自启动以来的累计网络字节数（rx, tx）。
+func (c *SystemCollector) CollectTotalFlow() (int64, int64) {
+	rx, tx := c.getNetCounters()
+	return rx, tx
+}
+
+// ConfirmNetReported 在成功上报后更新基线值。
+func (c *SystemCollector) ConfirmNetReported() {
+	if c.currentNet != nil {
+		c.prevNet = c.currentNet
+		now := monotonicSeconds()
+		c.prevNetTime = &now
+		c.saveNetState(c.currentNet[0], c.currentNet[1])
+	}
+}
+
+// --- CPU 采样 ---
+
+func (c *SystemCollector) cpuSamplingLoop() {
+	// 初始化
+	cpu.Percent(0, false)
+	for {
+		pct, err := cpu.Percent(time.Second, false)
+		if err == nil && len(pct) > 0 {
+			c.cpuMu.Lock()
+			c.cpuPercent = pct[0]
+			c.cpuMu.Unlock()
+		}
+	}
+}
+
+// --- 硬件采集辅助函数 ---
+
+func getCPUName(ctx context.Context) string {
+	infos, err := cpu.InfoWithContext(ctx)
+	if err == nil && len(infos) > 0 && infos[0].ModelName != "" {
+		return infos[0].ModelName
+	}
+	return runtime.GOARCH
+}
+
+func getVirtualization() string {
+	if runtime.GOOS != "linux" {
+		return ""
+	}
+	out, err := exec.Command("systemd-detect-virt").Output()
+	if err == nil {
+		virt := strings.TrimSpace(string(out))
+		if virt != "" && virt != "none" {
+			return virt
+		}
+	}
+	// 回退方案：/sys/hypervisor/type
+	data, err := os.ReadFile("/sys/hypervisor/type")
+	if err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	return ""
+}
+
+func getArch() string {
+	machine := runtime.GOARCH
+	switch machine {
+	case "amd64":
+		return "amd64"
+	case "arm64":
+		return "arm64"
+	case "arm":
+		return "armv7"
+	case "386":
+		return "i386"
+	default:
+		return machine
+	}
+}
+
+func getCPUCores(ctx context.Context) int {
+	n, err := cpu.CountsWithContext(ctx, true)
+	if err != nil || n == 0 {
+		return runtime.NumCPU()
+	}
+	return n
+}
+
+func getOSName() string {
+	if runtime.GOOS == "linux" {
+		data, err := os.ReadFile("/etc/os-release")
+		if err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "PRETTY_NAME=") {
+					name := strings.TrimPrefix(line, "PRETTY_NAME=")
+					return strings.Trim(name, "\"")
+				}
+			}
+		}
+	}
+	info, err := host.Info()
+	if err == nil {
+		if info.Platform != "" {
+			return fmt.Sprintf("%s %s", info.Platform, info.PlatformVersion)
+		}
+	}
+	return fmt.Sprintf("%s %s", runtime.GOOS, runtime.GOARCH)
+}
+
+func getKernelVersion() string {
+	info, err := host.Info()
+	if err == nil && info.KernelVersion != "" {
+		return info.KernelVersion
+	}
+	return ""
+}
+
+func getIPv4() string {
+	urls := []string{
+		"https://api4.ipify.org",
+		"https://ipv4.icanhazip.com",
+		"https://4.ident.me",
+	}
+
+	ch := make(chan string, len(urls))
+	client := &http.Client{Timeout: 3 * time.Second}
+
+	for _, u := range urls {
+		go func(url string) {
+			req, err := http.NewRequest("GET", url, nil)
+			if err != nil {
+				ch <- ""
+				return
+			}
+			req.Header.Set("User-Agent", "ColleiAgent/1.0")
+			resp, err := client.Do(req)
+			if err != nil {
+				ch <- ""
+				return
+			}
+			defer resp.Body.Close()
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				ch <- ""
+				return
+			}
+			ip := strings.TrimSpace(string(body))
+			if strings.Contains(ip, ".") && !strings.Contains(ip, ":") {
+				ch <- ip
+			} else {
+				ch <- ""
+			}
+		}(u)
+	}
+
+	for range urls {
+		ip := <-ch
+		if ip != "" {
+			return ip
+		}
+	}
+	return ""
+}
+
+func getIPv6() string {
+	conn, err := net.DialTimeout("udp6", "[2001:4860:4860::8888]:80", 2*time.Second)
+	if err != nil {
+		return ""
+	}
+	defer conn.Close()
+	addr := conn.LocalAddr().(*net.UDPAddr)
+	return addr.IP.String()
+}
+
+func getMemTotal(ctx context.Context) int64 {
+	v, err := mem.VirtualMemoryWithContext(ctx)
+	if err != nil {
+		return 0
+	}
+	return int64(v.Total)
+}
+
+func getSwapTotal(ctx context.Context) int64 {
+	v, err := mem.SwapMemoryWithContext(ctx)
+	if err != nil {
+		return 0
+	}
+	return int64(v.Total)
+}
+
+func getDiskTotal() int64 {
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = "C:\\"
+	}
+	usage, err := disk.Usage(root)
+	if err != nil {
+		return 0
+	}
+	return int64(usage.Total)
+}
+
+func getDiskUsage() (int64, int64) {
+	root := "/"
+	if runtime.GOOS == "windows" {
+		root = "C:\\"
+	}
+	usage, err := disk.Usage(root)
+	if err != nil {
+		return 0, 0
+	}
+	return int64(usage.Used), int64(usage.Total)
+}
+
+func getBootTime(ctx context.Context) int64 {
+	bt, err := host.BootTimeWithContext(ctx)
+	if err != nil {
+		return 0
+	}
+	return int64(bt)
+}
+
+func getLoadAvg() float64 {
+	avg, err := load.Avg()
+	if err != nil || avg == nil {
+		// 回退方案：Windows 使用 CPU 百分比
+		pct, err := cpu.Percent(0, false)
+		if err == nil && len(pct) > 0 {
+			return pct[0] / 100.0
+		}
+		return 0
+	}
+	return avg.Load1
+}
+
+func getProcessCount() int {
+	pids, err := process.Pids()
+	if err != nil {
+		return 0
+	}
+	return len(pids)
+}
+
+func getConnectionCounts() (int, int) {
+	conns, err := gnet.Connections("inet")
+	if err != nil {
+		// 回退方案：解析 Linux /proc/net
+		if runtime.GOOS == "linux" {
+			tcp := countProcLines("/proc/net/tcp") + countProcLines("/proc/net/tcp6")
+			udp := countProcLines("/proc/net/udp") + countProcLines("/proc/net/udp6")
+			return tcp, udp
+		}
+		return 0, 0
+	}
+
+	var tcp, udp int
+	for _, c := range conns {
+		switch c.Type {
+		case 1: // SOCK_STREAM = TCP
+			tcp++
+		case 2: // SOCK_DGRAM = UDP
+			udp++
+		}
+	}
+	return tcp, udp
+}
+
+func countProcLines(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) <= 1 {
+		return 0
+	}
+	return len(lines) - 1 // 减去表头行
+}
+
+// --- 网络流量 ---
+
+func (c *SystemCollector) calcNetSpeed() (int64, int64) {
+	rx, tx := c.getNetCounters()
+	now := monotonicSeconds()
+	c.currentNet = &[2]int64{rx, tx}
+
+	if c.prevNet == nil || c.prevNetTime == nil {
+		c.prevNet = &[2]int64{rx, tx}
+		c.prevNetTime = &now
+		c.saveNetState(rx, tx)
+		return 0, 0
+	}
+
+	elapsed := now - *c.prevNetTime
+	if elapsed <= 0 {
+		return 0, 0
+	}
+
+	netIn := rx - c.prevNet[0]
+	netOut := tx - c.prevNet[1]
+
+	// 系统重启：计数器重置，差值变为负数
+	if netIn < 0 {
+		netIn = rx
+	}
+	if netOut < 0 {
+		netOut = tx
+	}
+
+	return int64(float64(netIn) / elapsed), int64(float64(netOut) / elapsed)
+}
+
+func (c *SystemCollector) getNetCounters() (int64, int64) {
+	if c.networkInterface != "" {
+		counters, err := gnet.IOCounters(true)
+		if err == nil {
+			for _, ctr := range counters {
+				if ctr.Name == c.networkInterface {
+					return int64(ctr.BytesRecv), int64(ctr.BytesSent)
+				}
+			}
+			slog.Warn("specified network interface not found, falling back to total",
+				"interface", c.networkInterface)
+		}
+	}
+
+	counters, err := gnet.IOCounters(false)
+	if err != nil || len(counters) == 0 {
+		return 0, 0
+	}
+	return int64(counters[0].BytesRecv), int64(counters[0].BytesSent)
+}
+
+// --- 网络状态持久化 ---
+
+type netState struct {
+	RX int64 `json:"rx"`
+	TX int64 `json:"tx"`
+}
+
+func (c *SystemCollector) loadNetState() *[2]int64 {
+	if c.netStateFile == "" {
+		return nil
+	}
+	data, err := os.ReadFile(c.netStateFile)
+	if err != nil {
+		return nil
+	}
+	var s netState
+	if err := json.Unmarshal(data, &s); err != nil {
+		return nil
+	}
+	slog.Debug("restored network counters", "rx", s.RX, "tx", s.TX)
+	return &[2]int64{s.RX, s.TX}
+}
+
+func (c *SystemCollector) saveNetState(rx, tx int64) {
+	if c.netStateFile == "" {
+		return
+	}
+	data, _ := json.Marshal(netState{RX: rx, TX: tx})
+	_ = os.WriteFile(c.netStateFile, data, 0o644)
+}
+
+// --- 工具函数 ---
+
+func monotonicSeconds() float64 {
+	return float64(time.Now().UnixNano()) / 1e9
+}
+
+func mapsEqual(a, b map[string]interface{}) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || fmt.Sprintf("%v", v) != fmt.Sprintf("%v", bv) {
+			return false
+		}
+	}
+	return true
+}
