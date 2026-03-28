@@ -114,26 +114,33 @@ http_download() {
 # 通过面板代理下载 Agent 二进制（成功返回 0，失败返回 1）
 try_proxy_download() {
     local dest="$1"
-    local arch="$2"
-    local panel_url="$3"
-    local auth_token="$4"
+    local panel_url="$2"
+    local auth_token="$3"
+    local download_url="$4"
 
-    if [[ -z "$panel_url" || -z "$auth_token" ]]; then
+    if [[ -z "$panel_url" || -z "$auth_token" || -z "$download_url" ]]; then
         return 1
     fi
 
-    local proxy_url="${panel_url}/api/v1/agent/download?token=${auth_token}&arch=${arch}"
-    info "尝试通过面板代理下载..."
+    # 简易 percent-encoding（对 URL 参数值进行编码）
+    local encoded_url
+    encoded_url=$(printf '%s' "$download_url" | sed 's/%/%25/g; s/ /%20/g; s/!/%21/g; s/#/%23/g; s/\$/%24/g; s/&/%26/g; s/=/%3D/g; s/+/%2B/g; s/:/%3A/g; s/;/%3B/g; s/?/%3F/g; s/@/%40/g')
 
-    if http_download "$proxy_url" "$dest" 2>/dev/null; then
+    local proxy_url="${panel_url}/api/v1/agent/download?token=${auth_token}&url=${encoded_url}"
+    info "尝试通过面板代理下载..."
+    info "上游 URL: ${download_url}"
+
+    if http_download "$proxy_url" "$dest"; then
         # 检查下载的文件是否有效（非空且不是 HTML 错误页）
         if [[ -s "$dest" ]] && ! head -c 20 "$dest" | grep -qi '<!doctype\|<html\|{"detail"'; then
             info "通过面板代理下载成功"
             return 0
         fi
+        warn "代理下载内容校验失败（可能为 HTML 或错误响应）"
+    else
+        warn "代理下载请求失败"
     fi
 
-    warn "面板代理下载失败，将回退到 GitHub 下载"
     rm -f "$dest"
     return 1
 }
@@ -413,11 +420,18 @@ download_and_install() {
     # 仅在指定 --proxy-download 时通过面板代理下载
     if [[ "$PROXY_DOWNLOAD" == true ]]; then
         local auth_token="${REG_TOKEN:-${TOKEN:-}}"
-        if try_proxy_download "$tmp_file" "$arch" "$COLLEI_URL" "$auth_token"; then
+        # 构造完整的 GitHub 下载 URL（使用 latest redirect URL，无需访问 API）
+        local proxy_download_url
+        if [[ "$VERSION" == "latest" ]]; then
+            proxy_download_url="https://github.com/${GITHUB_REPO}/releases/latest/download/${asset_name}"
+        else
+            proxy_download_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${asset_name}"
+        fi
+        if try_proxy_download "$tmp_file" "$COLLEI_URL" "$auth_token" "$proxy_download_url"; then
             downloaded=true
         else
             rm -f "$tmp_file"
-            error "面板代理下载失败，请检查面板是否已配置 agent_url"
+            error "面板代理下载失败"
             exit 1
         fi
     fi
@@ -802,7 +816,14 @@ do_update() {
 
     # 仅在指定 --proxy-download 时通过面板代理下载
     if [[ "$PROXY_DOWNLOAD" == true ]]; then
-        if try_proxy_download "$tmp_file" "$arch" "$panel_url" "$auth_token"; then
+        # 构造完整的 GitHub 下载 URL
+        local proxy_download_url
+        if [[ "$VERSION" == "latest" ]]; then
+            proxy_download_url="https://github.com/${GITHUB_REPO}/releases/latest/download/${asset_name}"
+        else
+            proxy_download_url="https://github.com/${GITHUB_REPO}/releases/download/${VERSION}/${asset_name}"
+        fi
+        if try_proxy_download "$tmp_file" "$panel_url" "$auth_token" "$proxy_download_url"; then
             downloaded=true
         else
             rm -f "$tmp_file"
@@ -810,7 +831,7 @@ do_update() {
                 warn "代理下载失败，正在恢复服务..."
                 systemctl start collei-agent
             fi
-            error "面板代理下载失败，请检查面板是否已配置 agent_url"
+            error "面板代理下载失败"
             exit 1
         fi
     fi
