@@ -64,6 +64,33 @@ func (t *SSHTunnel) closeAll() {
 	t.mu.Unlock()
 }
 
+// safeWS wraps a websocket.Conn with a write mutex to prevent concurrent writes.
+// gorilla/websocket does not support concurrent writers.
+type safeWS struct {
+	conn *websocket.Conn
+	mu   sync.Mutex
+}
+
+func (s *safeWS) WriteMessage(messageType int, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.conn.WriteMessage(messageType, data)
+}
+
+// WriteDataFrame atomically writes a JSON header + binary data frame pair.
+func (s *safeWS) WriteDataFrame(sessionID string, data []byte) error {
+	header, _ := json.Marshal(map[string]string{
+		"type":       "data",
+		"session_id": sessionID,
+	})
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.conn.WriteMessage(websocket.TextMessage, header); err != nil {
+		return err
+	}
+	return s.conn.WriteMessage(websocket.BinaryMessage, data)
+}
+
 // Manager 管理后端 WebSocket 隧道，用于 Web SSH。
 type Manager struct {
 	ctx     context.Context
@@ -212,16 +239,18 @@ func (m *Manager) maintainTunnel(ctx context.Context) {
 			delay = 1.0
 			slog.Info("SSH tunnel: WebSocket connected")
 
+			sw := &safeWS{conn: ws}
+
 			// 发送能力声明
 			capMsg, _ := json.Marshal(map[string]interface{}{
 				"type":     "capabilities",
 				"ssh_port": m.sshPort,
 			})
-			if err := ws.WriteMessage(websocket.TextMessage, capMsg); err != nil {
+			if err := sw.WriteMessage(websocket.TextMessage, capMsg); err != nil {
 				slog.Warn("SSH tunnel: failed to send capabilities", "error", err)
 			} else {
 				slog.Debug("SSH tunnel: capabilities sent", "ssh_port", m.sshPort)
-				m.handleMessages(ws, ctx)
+				m.handleMessages(sw, ctx)
 			}
 			ws.Close()
 			m.mu.Lock()
@@ -255,7 +284,7 @@ func (m *Manager) maintainTunnel(ctx context.Context) {
 }
 
 // handleMessages 处理 WebSocket 消息循环。
-func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
+func (m *Manager) handleMessages(sw *safeWS, ctx context.Context) {
 	tun := newSSHTunnel()
 
 	// 跟踪活动的桥接协程
@@ -267,7 +296,7 @@ func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 	// 因此不能使用 SetReadDeadline + continue 模式来检查停止信号。
 	go func() {
 		<-ctx.Done()
-		ws.Close()
+		sw.conn.Close()
 	}()
 
 	defer func() {
@@ -277,7 +306,7 @@ func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 	}()
 
 	for {
-		msgType, msg, err := ws.ReadMessage()
+		msgType, msg, err := sw.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				slog.Info("SSH tunnel: WebSocket closed normally")
@@ -298,7 +327,7 @@ func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 					if _, writeErr := conn.Write(msg); writeErr != nil {
 						slog.Warn("SSH tunnel: TCP write failed",
 							"session", pendingSessionID, "error", writeErr)
-						sendTunnelClosed(ws, pendingSessionID, "tcp_write_error")
+						sendTunnelClosed(sw, pendingSessionID, "tcp_write_error")
 						tun.close(pendingSessionID)
 					}
 				}
@@ -323,7 +352,7 @@ func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				m.handleOpenTunnel(ws, tun, sessionID)
+				m.handleOpenTunnel(sw, tun, sessionID)
 			}()
 
 		case "data":
@@ -343,7 +372,7 @@ func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 
 		case "ping":
 			pong, _ := json.Marshal(map[string]string{"type": "pong"})
-			ws.WriteMessage(websocket.TextMessage, pong)
+			sw.WriteMessage(websocket.TextMessage, pong)
 
 		default:
 			slog.Debug("SSH tunnel: unknown message type", "type", msgTypeStr)
@@ -352,12 +381,12 @@ func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 }
 
 // handleOpenTunnel 打开到 localhost:sshPort 的 TCP 连接并进行桥接。
-func (m *Manager) handleOpenTunnel(ws *websocket.Conn, tun *SSHTunnel, sessionID string) {
+func (m *Manager) handleOpenTunnel(sw *safeWS, tun *SSHTunnel, sessionID string) {
 	conn, err := tun.open(sessionID, m.sshPort)
 	if err != nil {
 		slog.Warn("SSH tunnel: TCP connect to sshd failed",
 			"session", sessionID, "port", m.sshPort, "error", err)
-		sendTunnelClosed(ws, sessionID, fmt.Sprintf("connection_failed: %v", err))
+		sendTunnelClosed(sw, sessionID, fmt.Sprintf("connection_failed: %v", err))
 		return
 	}
 
@@ -366,35 +395,26 @@ func (m *Manager) handleOpenTunnel(ws *websocket.Conn, tun *SSHTunnel, sessionID
 		"type":       "tunnel_ready",
 		"session_id": sessionID,
 	})
-	if err := ws.WriteMessage(websocket.TextMessage, readyMsg); err != nil {
+	if err := sw.WriteMessage(websocket.TextMessage, readyMsg); err != nil {
 		slog.Warn("SSH tunnel: failed to send tunnel_ready", "session", sessionID, "error", err)
 		tun.close(sessionID)
 		return
 	}
 
 	// 桥接 TCP → WS（WS → TCP 在消息循环中通过 "data" 消息处理）
-	bridgeTCPToWS(ws, conn, sessionID)
+	bridgeTCPToWS(sw, conn, sessionID)
 	tun.close(sessionID)
 }
 
 // bridgeTCPToWS 从 TCP 读取数据，通过 WS 发送 JSON 头部帧 + 二进制数据帧。
-func bridgeTCPToWS(ws *websocket.Conn, conn net.Conn, sessionID string) {
+func bridgeTCPToWS(sw *safeWS, conn net.Conn, sessionID string) {
 	buf := make([]byte, 32768) // 32KB
 	for {
 		n, err := conn.Read(buf)
 		if n > 0 {
-			// 发送 JSON 头部帧
-			header, _ := json.Marshal(map[string]string{
-				"type":       "data",
-				"session_id": sessionID,
-			})
-			if writeErr := ws.WriteMessage(websocket.TextMessage, header); writeErr != nil {
-				slog.Debug("SSH tunnel: WS write header failed", "session", sessionID, "error", writeErr)
-				return
-			}
-			// 发送二进制数据帧
-			if writeErr := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); writeErr != nil {
-				slog.Debug("SSH tunnel: WS write data failed", "session", sessionID, "error", writeErr)
+			// 原子发送 header + data 帧对，防止多会话交错
+			if writeErr := sw.WriteDataFrame(sessionID, buf[:n]); writeErr != nil {
+				slog.Debug("SSH tunnel: WS write failed", "session", sessionID, "error", writeErr)
 				return
 			}
 		}
@@ -404,18 +424,18 @@ func bridgeTCPToWS(ws *websocket.Conn, conn net.Conn, sessionID string) {
 			} else {
 				slog.Debug("SSH tunnel: TCP EOF", "session", sessionID)
 			}
-			sendTunnelClosed(ws, sessionID, "tcp_eof")
+			sendTunnelClosed(sw, sessionID, "tcp_eof")
 			return
 		}
 	}
 }
 
 // sendTunnelClosed 发送 tunnel_closed JSON 帧（静默忽略错误）。
-func sendTunnelClosed(ws *websocket.Conn, sessionID, reason string) {
+func sendTunnelClosed(sw *safeWS, sessionID, reason string) {
 	msg, _ := json.Marshal(map[string]string{
 		"type":       "tunnel_closed",
 		"session_id": sessionID,
 		"reason":     reason,
 	})
-	_ = ws.WriteMessage(websocket.TextMessage, msg)
+	_ = sw.WriteMessage(websocket.TextMessage, msg)
 }
