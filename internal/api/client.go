@@ -59,6 +59,16 @@ type SSHTunnelDirective struct {
 	Connect *bool `json:"connect,omitempty"`
 }
 
+// TerminalDirective 表示后端对终端直连的控制指令（ConPTY 模式）。
+type TerminalDirective struct {
+	Connect *bool `json:"connect,omitempty"`
+}
+
+// FileAPIDirective 表示后端对文件 API 的控制指令。
+type FileAPIDirective struct {
+	Connect *bool `json:"connect,omitempty"`
+}
+
 // PendingTask 表示后端下发的待执行任务。
 type PendingTask struct {
 	ExecutionID string `json:"execution_id"`
@@ -73,6 +83,8 @@ type ReportResponse struct {
 	Received        bool                `json:"received"`
 	NetworkDispatch *network.Dispatch   `json:"network_dispatch,omitempty"`
 	SSHTunnel       *SSHTunnelDirective `json:"ssh_tunnel,omitempty"`
+	Terminal        *TerminalDirective  `json:"terminal,omitempty"`
+	FileAPI         *FileAPIDirective   `json:"file_api,omitempty"`
 	PendingTasks    []PendingTask       `json:"pending_tasks,omitempty"`
 }
 

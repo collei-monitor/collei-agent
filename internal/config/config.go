@@ -17,14 +17,28 @@ type SSHConfig struct {
 	CaConfigured bool `yaml:"ca_configured"`
 }
 
+// TerminalConfig 存储终端直连（ConPTY）配置。
+type TerminalConfig struct {
+	Enabled      bool   `yaml:"enabled"`
+	DefaultShell string `yaml:"default_shell,omitempty"`
+}
+
+// FileAPIConfig 存储文件 API 配置。
+type FileAPIConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 // persistedConfig 是写入 agent.yaml 的字段子集。
 type persistedConfig struct {
-	ServerURL        string     `yaml:"server_url,omitempty"`
-	UUID             string     `yaml:"uuid,omitempty"`
-	Token            string     `yaml:"token,omitempty"`
-	NetworkInterface string     `yaml:"network_interface,omitempty"`
-	SSH              *SSHConfig `yaml:"ssh,omitempty"`
-	AutoUpdate       *bool      `yaml:"auto_update,omitempty"`
+	ServerURL        string          `yaml:"server_url,omitempty"`
+	UUID             string          `yaml:"uuid,omitempty"`
+	Token            string          `yaml:"token,omitempty"`
+	NetworkInterface string          `yaml:"network_interface,omitempty"`
+	SSH              *SSHConfig      `yaml:"ssh,omitempty"`
+	Terminal         *TerminalConfig `yaml:"terminal,omitempty"`
+	FileAPI          *FileAPIConfig  `yaml:"file_api,omitempty"`
+	CAPublicKeyPath  string          `yaml:"ca_public_key_path,omitempty"`
+	AutoUpdate       *bool           `yaml:"auto_update,omitempty"`
 }
 
 // AgentConfig 存储完整的 Agent 配置。
@@ -35,6 +49,9 @@ type AgentConfig struct {
 	Token            string
 	NetworkInterface string
 	SSH              SSHConfig
+	Terminal         TerminalConfig
+	FileAPI          FileAPIConfig
+	CAPublicKeyPath  string
 	AutoUpdate       bool
 
 	// 仅运行时字段（不持久化）
@@ -56,6 +73,15 @@ const DefaultVerifyInterval = 5.0
 func DefaultConfigDir() string {
 	switch runtime.GOOS {
 	case "windows":
+		// 优先选择 ProgramData 用于服务模式 (SYSTEM 账户)。
+		// 回退到 APPDATA 用于交互模式。
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			serviceDir := filepath.Join(pd, "collei-agent")
+			// 如果服务目录已存在，使用它（服务模式）。
+			if _, err := os.Stat(serviceDir); err == nil {
+				return serviceDir
+			}
+		}
 		appData := os.Getenv("APPDATA")
 		if appData == "" {
 			appData = "."
@@ -77,6 +103,27 @@ func DefaultConfigDir() string {
 // DefaultConfigPath 返回 agent.yaml 的默认路径。
 func DefaultConfigPath() string {
 	return filepath.Join(DefaultConfigDir(), "agent.yaml")
+}
+
+// DefaultCAPublicKeyPath 返回 CA 公钥的默认路径。
+func DefaultCAPublicKeyPath() string {
+	switch runtime.GOOS {
+	case "windows":
+		return filepath.Join(DefaultConfigDir(), "ca.pub")
+	default:
+		return "/etc/ssh/collei-ca.pub"
+	}
+}
+
+// ServiceConfigDir 返回 Windows 服务模式下的配置目录。
+// 非 Windows 平台返回 DefaultConfigDir()。
+func ServiceConfigDir() string {
+	if runtime.GOOS == "windows" {
+		if pd := os.Getenv("ProgramData"); pd != "" {
+			return filepath.Join(pd, "collei-agent")
+		}
+	}
+	return DefaultConfigDir()
 }
 
 // IsRegistered 返回 Agent 是否已注册（有 URL 和 Token）。
@@ -128,6 +175,15 @@ func (c *AgentConfig) Save(path string) error {
 	}
 	if c.SSH.Enabled {
 		p.SSH = &c.SSH
+	}
+	if c.Terminal.Enabled {
+		p.Terminal = &c.Terminal
+	}
+	if c.FileAPI.Enabled {
+		p.FileAPI = &c.FileAPI
+	}
+	if c.CAPublicKeyPath != "" {
+		p.CAPublicKeyPath = c.CAPublicKeyPath
 	}
 	if !c.AutoUpdate {
 		v := false
@@ -184,6 +240,15 @@ func Load(path string) *AgentConfig {
 	cfg.NetworkInterface = p.NetworkInterface
 	if p.SSH != nil {
 		cfg.SSH = *p.SSH
+	}
+	if p.Terminal != nil {
+		cfg.Terminal = *p.Terminal
+	}
+	if p.FileAPI != nil {
+		cfg.FileAPI = *p.FileAPI
+	}
+	if p.CAPublicKeyPath != "" {
+		cfg.CAPublicKeyPath = p.CAPublicKeyPath
 	}
 	if p.AutoUpdate != nil {
 		cfg.AutoUpdate = *p.AutoUpdate

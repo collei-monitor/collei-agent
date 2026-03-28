@@ -14,6 +14,7 @@ import (
 	"github.com/collei-monitor/collei-agent/internal/collector"
 	"github.com/collei-monitor/collei-agent/internal/config"
 	"github.com/collei-monitor/collei-agent/internal/core"
+	"github.com/collei-monitor/collei-agent/internal/service"
 )
 
 func main() {
@@ -83,6 +84,19 @@ func main() {
 			}
 
 			agent := core.New(cfg)
+
+			// Windows 服务模式：在 SCM 下运行
+			if service.IsWindowsService() {
+				slog.Info("running as Windows service")
+				if err := service.RunAsService(func(ctx context.Context) {
+					agent.RunWithContext(ctx)
+				}); err != nil {
+					slog.Error("service run failed", "error", err)
+					os.Exit(1)
+				}
+				return
+			}
+
 			agent.Run()
 		},
 	}
@@ -134,7 +148,65 @@ func main() {
 		},
 	}
 
-	rootCmd.AddCommand(runCmd, collectCmd, versionCmd)
+	// --- service 子命令组 ---
+	var serviceConfigPath string
+	serviceCmd := &cobra.Command{
+		Use:   "service",
+		Short: "Manage Windows service (install/uninstall/start/stop)",
+	}
+
+	serviceInstallCmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install as Windows service",
+		Run: func(cmd *cobra.Command, args []string) {
+			if runtime.GOOS != "windows" {
+				slog.Error("service commands are only available on Windows")
+				os.Exit(1)
+			}
+			if err := service.Install(serviceConfigPath); err != nil {
+				slog.Error("service install failed", "error", err)
+				os.Exit(1)
+			}
+		},
+	}
+	serviceInstallCmd.Flags().StringVar(&serviceConfigPath, "config", "", "Config file path for the service")
+
+	serviceUninstallCmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Uninstall Windows service",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.Uninstall(); err != nil {
+				slog.Error("service uninstall failed", "error", err)
+				os.Exit(1)
+			}
+		},
+	}
+
+	serviceStartCmd := &cobra.Command{
+		Use:   "start",
+		Short: "Start Windows service",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.Start(); err != nil {
+				slog.Error("service start failed", "error", err)
+				os.Exit(1)
+			}
+		},
+	}
+
+	serviceStopCmd := &cobra.Command{
+		Use:   "stop",
+		Short: "Stop Windows service",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := service.Stop(); err != nil {
+				slog.Error("service stop failed", "error", err)
+				os.Exit(1)
+			}
+		},
+	}
+
+	serviceCmd.AddCommand(serviceInstallCmd, serviceUninstallCmd, serviceStartCmd, serviceStopCmd)
+
+	rootCmd.AddCommand(runCmd, collectCmd, versionCmd, serviceCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

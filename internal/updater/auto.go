@@ -36,7 +36,7 @@ func (a *AutoUpdater) Start() {
 
 // Stop 停止自动更新协程。
 func (a *AutoUpdater) Stop() {
-	// Context cancellation handles stopping; kept for interface compatibility.
+	// 上下文取消处理停止；保持为接口兼容性。
 }
 
 func (a *AutoUpdater) loop() {

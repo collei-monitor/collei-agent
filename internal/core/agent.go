@@ -8,15 +8,19 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/collei-monitor/collei-agent/internal/api"
+	"github.com/collei-monitor/collei-agent/internal/auth"
 	"github.com/collei-monitor/collei-agent/internal/collector"
 	"github.com/collei-monitor/collei-agent/internal/config"
+	"github.com/collei-monitor/collei-agent/internal/fileapi"
 	"github.com/collei-monitor/collei-agent/internal/network"
 	"github.com/collei-monitor/collei-agent/internal/task"
+	"github.com/collei-monitor/collei-agent/internal/terminal"
 	"github.com/collei-monitor/collei-agent/internal/tunnel"
 	"github.com/collei-monitor/collei-agent/internal/updater"
 )
@@ -68,6 +72,9 @@ type Agent struct {
 	netMonitor  *network.Monitor
 	taskExec    *task.Executor
 	sshManager  *tunnel.Manager
+	termManager *terminal.Manager
+	fileManager *fileapi.Manager
+	verifier    *auth.Verifier
 	autoUpdater *updater.AutoUpdater
 	stateDir    string
 }
@@ -106,6 +113,9 @@ func (a *Agent) Run() {
 	// 检查上次升级结果
 	a.checkUpgradeResult(upd)
 
+	// 加载 CA 公钥验证器（用于终端/文件 API 签名验证）
+	a.loadVerifier()
+
 	// 启动自动更新
 	if a.Config.AutoUpdate {
 		a.autoUpdater = updater.NewAutoUpdater(a.ctx, upd, Version)
@@ -124,6 +134,34 @@ func (a *Agent) Run() {
 func (a *Agent) Stop() {
 	slog.Info("Agent stop requested...")
 	a.cancel()
+}
+
+// RunWithContext 使用外部上下文启动代理（适用于 Windows 服务模式）
+// 外部上下文替换内部取消上下文
+func (a *Agent) RunWithContext(ctx context.Context) {
+	a.cancel() // 取消原始内部上下文
+	a.ctx, a.cancel = context.WithCancel(ctx)
+	a.Run()
+}
+
+func (a *Agent) loadVerifier() {
+	caPath := a.Config.CAPublicKeyPath
+	if caPath == "" {
+		caPath = config.DefaultCAPublicKeyPath()
+	}
+
+	v, err := auth.LoadVerifierFromFile(caPath)
+	if err != nil {
+		slog.Warn("CA public key load failed, signature verification disabled", "path", caPath, "error", err)
+		return
+	}
+	if v == nil {
+		slog.Info("CA public key not found, signature verification disabled", "path", caPath)
+		return
+	}
+
+	a.verifier = v
+	slog.Info("CA signature verification enabled", "path", caPath)
 }
 
 func (a *Agent) interruptibleSleep(d time.Duration) {
@@ -358,6 +396,8 @@ func (a *Agent) reportLoop() {
 
 			a.netMonitor.HandleDispatch(resp.NetworkDispatch)
 			a.handleSSHTunnel(resp.SSHTunnel)
+			a.handleTerminal(resp.Terminal)
+			a.handleFileAPI(resp.FileAPI)
 
 			if a.taskExec != nil {
 				a.taskExec.HandlePendingTasks(resp.PendingTasks)
@@ -436,6 +476,64 @@ func (a *Agent) handleSSHTunnel(directive *api.SSHTunnelDirective) {
 	}
 }
 
+// --- 终端直连（ConPTY） ---
+
+func (a *Agent) handleTerminal(directive *api.TerminalDirective) {
+	if !a.Config.Terminal.Enabled || directive == nil || directive.Connect == nil {
+		// 自动启用：Windows 平台且 terminal 支持时，即使未在配置中显式启用
+		if runtime.GOOS == "windows" && terminal.Supported() && directive != nil && directive.Connect != nil {
+			// allow
+		} else {
+			return
+		}
+	}
+
+	if *directive.Connect {
+		if a.termManager == nil {
+			a.termManager = terminal.NewManager(
+				a.ctx,
+				a.Config.ServerURL,
+				a.Config.Token,
+				a.Config.Terminal.DefaultShell,
+				a.verifier,
+			)
+		}
+		a.termManager.Connect()
+	} else {
+		if a.termManager != nil {
+			a.termManager.Disconnect()
+		}
+	}
+}
+
+// --- 文件 API ---
+
+func (a *Agent) handleFileAPI(directive *api.FileAPIDirective) {
+	if !a.Config.FileAPI.Enabled || directive == nil || directive.Connect == nil {
+		if runtime.GOOS == "windows" && directive != nil && directive.Connect != nil {
+			// allow on Windows even if not explicitly configured
+		} else {
+			return
+		}
+	}
+
+	if *directive.Connect {
+		if a.fileManager == nil {
+			a.fileManager = fileapi.NewManager(
+				a.ctx,
+				a.Config.ServerURL,
+				a.Config.Token,
+				a.verifier,
+			)
+		}
+		a.fileManager.Connect()
+	} else {
+		if a.fileManager != nil {
+			a.fileManager.Disconnect()
+		}
+	}
+}
+
 // --- 信号处理和清理 ---
 
 func (a *Agent) setupSignalHandlers() {
@@ -466,6 +564,14 @@ func (a *Agent) shutdown() {
 	if a.sshManager != nil {
 		a.sshManager.Stop()
 		a.sshManager = nil
+	}
+	if a.termManager != nil {
+		a.termManager.Stop()
+		a.termManager = nil
+	}
+	if a.fileManager != nil {
+		a.fileManager.Stop()
+		a.fileManager = nil
 	}
 	if a.apiClient != nil {
 		a.apiClient.Close()

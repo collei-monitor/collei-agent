@@ -74,8 +74,8 @@ type Manager struct {
 	mu         sync.Mutex
 	wanted     bool
 	connected  bool
-	loopCancel context.CancelFunc // cancels the current maintainTunnel loop
-	doneCh     chan struct{}      // closed when maintainTunnel exits
+	loopCancel context.CancelFunc // 取消当前的 maintainTunnel 循环
+	doneCh     chan struct{}      // 当 maintainTunnel 退出时关闭
 }
 
 // NewManager 创建一个新的 SSH 隧道管理器。
