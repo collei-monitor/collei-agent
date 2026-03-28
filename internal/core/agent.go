@@ -500,4 +500,3 @@ func parseRetryAfter(headers http.Header) float64 {
 	}
 	return 0
 }
-

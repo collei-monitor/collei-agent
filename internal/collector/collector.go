@@ -100,37 +100,37 @@ type NetInterface struct {
 
 // LoadData 包含实时监控数据。
 type LoadData struct {
-	CPU      float64 `json:"cpu"`
-	RAM      int64   `json:"ram"`
-	RAMTotal int64   `json:"ram_total"`
-	Swap     int64   `json:"swap"`
-	SwapTotal int64  `json:"swap_total"`
-	Load     float64 `json:"load"`
-	Disk     int64   `json:"disk"`
-	DiskTotal int64  `json:"disk_total"`
-	NetIn    int64   `json:"net_in"`
-	NetOut   int64   `json:"net_out"`
-	TCP      int     `json:"tcp"`
-	UDP      int     `json:"udp"`
-	Process  int     `json:"process"`
+	CPU       float64 `json:"cpu"`
+	RAM       int64   `json:"ram"`
+	RAMTotal  int64   `json:"ram_total"`
+	Swap      int64   `json:"swap"`
+	SwapTotal int64   `json:"swap_total"`
+	Load      float64 `json:"load"`
+	Disk      int64   `json:"disk"`
+	DiskTotal int64   `json:"disk_total"`
+	NetIn     int64   `json:"net_in"`
+	NetOut    int64   `json:"net_out"`
+	TCP       int     `json:"tcp"`
+	UDP       int     `json:"udp"`
+	Process   int     `json:"process"`
 }
 
 // ToMap 将 LoadData 转换为 map。
 func (l *LoadData) ToMap() map[string]interface{} {
 	return map[string]interface{}{
-		"cpu":       l.CPU,
-		"ram":       l.RAM,
-		"ram_total": l.RAMTotal,
-		"swap":      l.Swap,
+		"cpu":        l.CPU,
+		"ram":        l.RAM,
+		"ram_total":  l.RAMTotal,
+		"swap":       l.Swap,
 		"swap_total": l.SwapTotal,
-		"load":      l.Load,
-		"disk":      l.Disk,
+		"load":       l.Load,
+		"disk":       l.Disk,
 		"disk_total": l.DiskTotal,
-		"net_in":    l.NetIn,
-		"net_out":   l.NetOut,
-		"tcp":       l.TCP,
-		"udp":       l.UDP,
-		"process":   l.Process,
+		"net_in":     l.NetIn,
+		"net_out":    l.NetOut,
+		"tcp":        l.TCP,
+		"udp":        l.UDP,
+		"process":    l.Process,
 	}
 }
 
@@ -143,10 +143,10 @@ type SystemCollector struct {
 	currentNet  *[2]int64
 	prevNetTime *float64
 
-	lastHW         map[string]interface{}
-	cachedHW       *HardwareInfo
-	lastHWTime     float64
-	hwCacheTTL     float64
+	lastHW     map[string]interface{}
+	cachedHW   *HardwareInfo
+	lastHWTime float64
+	hwCacheTTL float64
 
 	cpuPercent float64
 	cpuMu      sync.RWMutex
