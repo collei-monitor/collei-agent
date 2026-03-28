@@ -47,34 +47,31 @@ func NewExecutor(apiClient *api.Client, upd *updater.Updater) *Executor {
 }
 
 // HandlePendingTasks 处理上报响应中的 pending_tasks 列表。
-func (e *Executor) HandlePendingTasks(tasks []map[string]interface{}) {
+func (e *Executor) HandlePendingTasks(tasks []api.PendingTask) {
 	if len(tasks) == 0 {
 		return
 	}
 
 	for _, t := range tasks {
-		execID, _ := t["execution_id"].(string)
-		if execID == "" {
+		if t.ExecutionID == "" {
 			slog.Warn("task: received task without execution_id, skipping")
 			continue
 		}
 
 		e.mu.Lock()
-		if _, active := e.activeTasks[execID]; active {
+		if _, active := e.activeTasks[t.ExecutionID]; active {
 			e.mu.Unlock()
-			slog.Debug("task: already executing, skipping", "execution_id", execID)
+			slog.Debug("task: already executing, skipping", "execution_id", t.ExecutionID)
 			continue
 		}
-		e.activeTasks[execID] = struct{}{}
+		e.activeTasks[t.ExecutionID] = struct{}{}
 		e.mu.Unlock()
 
-		taskType, _ := t["type"].(string)
-		timeoutSec := toIntDefault(t["timeout_sec"], DefaultTimeoutSec)
 		slog.Info("task: accepted",
-			"execution_id", execID, "type", taskType, "timeout_sec", timeoutSec)
+			"execution_id", t.ExecutionID, "type", t.Type, "timeout_sec", t.TimeoutSec)
 
 		e.wg.Add(1)
-		go func(task map[string]interface{}) {
+		go func(task api.PendingTask) {
 			e.sem <- struct{}{} // 获取信号量
 			defer func() {
 				<-e.sem // 释放信号量
@@ -92,20 +89,20 @@ func (e *Executor) Shutdown() {
 
 // --- 任务执行 ---
 
-func (e *Executor) executeTask(task map[string]interface{}) {
-	execID, _ := task["execution_id"].(string)
-	taskType, _ := task["type"].(string)
-	timeoutSec := toIntDefault(task["timeout_sec"], DefaultTimeoutSec)
+func (e *Executor) executeTask(task api.PendingTask) {
+	defer e.finishTask(task.ExecutionID)
 
-	defer e.finishTask(execID)
+	timeoutSec := task.TimeoutSec
+	if timeoutSec <= 0 {
+		timeoutSec = DefaultTimeoutSec
+	}
 
 	// 解析载荷
-	payloadStr, _ := task["payload"].(string)
 	var payload map[string]interface{}
-	if payloadStr != "" {
-		if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-			slog.Error("task: payload parse failed", "execution_id", execID, "error", err)
-			e.reportStatus(execID, "failed", intPtr(-1), strPtr(fmt.Sprintf("Payload parse error: %v", err)))
+	if task.Payload != "" {
+		if err := json.Unmarshal([]byte(task.Payload), &payload); err != nil {
+			slog.Error("task: payload parse failed", "execution_id", task.ExecutionID, "error", err)
+			e.reportStatus(task.ExecutionID, "failed", intPtr(-1), strPtr(fmt.Sprintf("Payload parse error: %v", err)))
 			return
 		}
 	} else {
@@ -113,18 +110,18 @@ func (e *Executor) executeTask(task map[string]interface{}) {
 	}
 
 	// 上报运行状态
-	e.reportStatus(execID, "running", nil, nil)
+	e.reportStatus(task.ExecutionID, "running", nil, nil)
 
-	switch taskType {
+	switch task.Type {
 	case "shell", "command":
-		e.execShell(execID, payload, timeoutSec)
+		e.execShell(task.ExecutionID, payload, timeoutSec)
 	case "script":
-		e.execScript(execID, payload, timeoutSec)
+		e.execScript(task.ExecutionID, payload, timeoutSec)
 	case "upgrade_agent":
-		e.execUpgrade(execID, payload)
+		e.execUpgrade(task.ExecutionID, payload)
 	default:
-		e.reportStatus(execID, "failed", intPtr(-1),
-			strPtr(fmt.Sprintf("Unsupported task type: %s", taskType)))
+		e.reportStatus(task.ExecutionID, "failed", intPtr(-1),
+			strPtr(fmt.Sprintf("Unsupported task type: %s", task.Type)))
 	}
 }
 
@@ -331,19 +328,6 @@ func (e *Executor) finishTask(execID string) {
 }
 
 // --- 辅助函数 ---
-
-func toIntDefault(v interface{}, def int) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case int64:
-		return int(n)
-	default:
-		return def
-	}
-}
 
 func intPtr(v int) *int       { return &v }
 func strPtr(v string) *string { return &v }

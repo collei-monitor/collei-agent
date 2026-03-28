@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -8,7 +9,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
@@ -60,9 +60,8 @@ type Agent struct {
 	Config *config.AgentConfig
 	State  AgentState
 
-	running bool
-	stopCh  chan struct{}
-	once    sync.Once
+	ctx    context.Context
+	cancel context.CancelFunc
 
 	apiClient   *api.Client
 	collector   *collector.SystemCollector
@@ -75,7 +74,7 @@ type Agent struct {
 
 // New 创建一个新的 Agent 实例。
 func New(cfg *config.AgentConfig) *Agent {
-	stopCh := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
 	stateDir := config.DefaultConfigDir()
 	if cfg.ConfigPath != "" {
 		stateDir = filepath.Dir(cfg.ConfigPath)
@@ -84,16 +83,16 @@ func New(cfg *config.AgentConfig) *Agent {
 	return &Agent{
 		Config:     cfg,
 		State:      StateInit,
-		stopCh:     stopCh,
+		ctx:        ctx,
+		cancel:     cancel,
 		stateDir:   stateDir,
-		collector:  collector.NewSystemCollector(cfg.NetworkInterface, stateDir),
-		netMonitor: network.NewMonitor(stopCh),
+		collector:  collector.NewSystemCollector(ctx, cfg.NetworkInterface, stateDir),
+		netMonitor: network.NewMonitor(ctx),
 	}
 }
 
 // Run 启动 Agent 主循环（阻塞直到停止）。
 func (a *Agent) Run() {
-	a.running = true
 	a.setupSignalHandlers()
 
 	slog.Info("Collei Agent started", "version", Version)
@@ -109,7 +108,7 @@ func (a *Agent) Run() {
 
 	// 启动自动更新
 	if a.Config.AutoUpdate {
-		a.autoUpdater = updater.NewAutoUpdater(upd, Version)
+		a.autoUpdater = updater.NewAutoUpdater(a.ctx, upd, Version)
 		a.autoUpdater.Start()
 		slog.Info("auto-update enabled", "interval", updater.DefaultCheckInterval)
 	} else {
@@ -124,23 +123,22 @@ func (a *Agent) Run() {
 // Stop 请求 Agent 停止。
 func (a *Agent) Stop() {
 	slog.Info("Agent stop requested...")
-	a.running = false
-	a.once.Do(func() { close(a.stopCh) })
+	a.cancel()
 }
 
 func (a *Agent) interruptibleSleep(d time.Duration) {
 	select {
-	case <-a.stopCh:
+	case <-a.ctx.Done():
 	case <-time.After(d):
 	}
 }
 
 func (a *Agent) isStopped() bool {
 	select {
-	case <-a.stopCh:
+	case <-a.ctx.Done():
 		return true
 	default:
-		return !a.running
+		return false
 	}
 }
 
@@ -149,7 +147,11 @@ func (a *Agent) isStopped() bool {
 func (a *Agent) mainLoop() {
 	a.initialHandshake()
 
-	for a.running {
+	for {
+		if a.isStopped() {
+			return
+		}
+
 		switch a.State {
 		case StateWaitingApproval:
 			a.pollApproval()
@@ -161,17 +163,13 @@ func (a *Agent) mainLoop() {
 			slog.Error("unexpected state, stopping", "state", a.State)
 			return
 		}
-
-		if a.isStopped() {
-			return
-		}
 	}
 }
 
 // --- 注册 / 验证 ---
 
 func (a *Agent) initialHandshake() {
-	for a.running {
+	for {
 		if a.isStopped() {
 			return
 		}
@@ -234,7 +232,7 @@ func (a *Agent) doRegister() error {
 		name = defaultHostname()
 	}
 
-	resp, err := a.apiClient.Register(a.Config.RegToken, name, hw.ToMap(), Version)
+	resp, err := a.apiClient.Register(a.Config.RegToken, name, hw, Version)
 	if err != nil {
 		return err
 	}
@@ -259,7 +257,7 @@ func (a *Agent) doVerify() error {
 		name = defaultHostname()
 	}
 
-	resp, err := a.apiClient.Verify(a.Config.Token, name, hw.ToMap(), Version)
+	resp, err := a.apiClient.Verify(a.Config.Token, name, hw, Version)
 	if err != nil {
 		return err
 	}
@@ -285,7 +283,7 @@ func (a *Agent) doVerify() error {
 func (a *Agent) pollApproval() {
 	slog.Info("waiting for approval", "poll_interval_sec", a.Config.VerifyInterval)
 
-	for a.running && a.State == StateWaitingApproval {
+	for !a.isStopped() && a.State == StateWaitingApproval {
 		a.interruptibleSleep(time.Duration(a.Config.VerifyInterval * float64(time.Second)))
 		if a.isStopped() {
 			return
@@ -324,40 +322,26 @@ func (a *Agent) reportLoop() {
 	}
 	a.interruptibleSleep(time.Duration(waitTime * float64(time.Second)))
 
-	for a.running && a.State == StateReporting {
-		var networkResults []map[string]interface{}
+	for !a.isStopped() && a.State == StateReporting {
+		var networkResults []network.ProbeResult
 
 		func() {
 			load := a.collector.CollectLoad()
 			hwChanges := a.collector.CollectHardwareIfChanged()
 			flowIn, flowOut := a.collector.CollectTotalFlow()
-			totalFlowIn, totalFlowOut := &flowIn, &flowOut
-			diskIO := a.collector.CollectDiskIO()
-			netIO := a.collector.CollectNetIO()
 			networkResults = a.netMonitor.FlushPendingResults()
 
-			var networkData []map[string]interface{}
-			if len(networkResults) > 0 {
-				networkData = networkResults
-			}
-
-			var currentDiskIO, currentNetIO interface{}
-			if len(diskIO) > 0 {
-				currentDiskIO = diskIO
-			}
-			if len(netIO) > 0 {
-				currentNetIO = netIO
-			}
-
-			resp, err := a.apiClient.Report(
-				a.Config.Token,
-				hwChanges,
-				load.ToMap(),
-				totalFlowIn, totalFlowOut,
-				currentDiskIO, currentNetIO,
-				a.netMonitor.Version(),
-				networkData,
-			)
+			resp, err := a.apiClient.Report(&api.ReportParams{
+				Token:          a.Config.Token,
+				Hardware:       hwChanges,
+				LoadData:       load,
+				TotalFlowIn:    flowIn,
+				TotalFlowOut:   flowOut,
+				DiskIO:         a.collector.CollectDiskIO(),
+				NetIO:          a.collector.CollectNetIO(),
+				NetworkVersion: a.netMonitor.Version(),
+				NetworkData:    networkResults,
+			})
 			if err != nil {
 				a.handleReportError(err, networkResults)
 				return
@@ -388,7 +372,7 @@ func (a *Agent) reportLoop() {
 	}
 }
 
-func (a *Agent) handleReportError(err error, networkResults []map[string]interface{}) {
+func (a *Agent) handleReportError(err error, networkResults []network.ProbeResult) {
 	if api.IsServerNotApproved(err) {
 		slog.Warn("server approval revoked, returning to wait mode")
 		a.State = StateWaitingApproval
@@ -401,8 +385,8 @@ func (a *Agent) handleReportError(err error, networkResults []map[string]interfa
 		return
 	}
 
-	apiErr, isApiErr := api.GetApiError(err)
-	if isApiErr {
+	apiErr, isAPIErr := api.GetAPIError(err)
+	if isAPIErr {
 		if apiErr.StatusCode >= 500 {
 			slog.Warn("server error, retrying", "status", apiErr.StatusCode, "detail", apiErr.Detail)
 			a.netMonitor.RequeueResults(networkResults)
@@ -435,22 +419,17 @@ func (a *Agent) handleReportError(err error, networkResults []map[string]interfa
 
 // --- SSH 隧道 ---
 
-func (a *Agent) handleSSHTunnel(sshTunnel map[string]interface{}) {
-	if !a.Config.SSH.Enabled || sshTunnel == nil {
+func (a *Agent) handleSSHTunnel(directive *api.SSHTunnelDirective) {
+	if !a.Config.SSH.Enabled || directive == nil || directive.Connect == nil {
 		return
 	}
 
-	connect, ok := sshTunnel["connect"]
-	if !ok {
-		return
-	}
-
-	if connect == true {
+	if *directive.Connect {
 		if a.sshManager == nil {
-			a.sshManager = tunnel.NewManager(a.Config.ServerURL, a.Config.Token, a.Config.SSH.Port)
+			a.sshManager = tunnel.NewManager(a.ctx, a.Config.ServerURL, a.Config.Token, a.Config.SSH.Port)
 		}
 		a.sshManager.Connect()
-	} else if connect == false {
+	} else {
 		if a.sshManager != nil {
 			a.sshManager.Disconnect()
 		}
@@ -463,9 +442,13 @@ func (a *Agent) setupSignalHandlers() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
-		sig := <-sigCh
-		slog.Info("received signal, stopping", "signal", sig)
-		a.Stop()
+		select {
+		case sig := <-sigCh:
+			slog.Info("received signal, stopping", "signal", sig)
+			a.cancel()
+		case <-a.ctx.Done():
+		}
+		signal.Stop(sigCh)
 	}()
 }
 

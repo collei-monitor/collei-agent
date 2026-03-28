@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"log/slog"
 	"time"
 
@@ -12,19 +13,19 @@ const DefaultCheckInterval = 6 * time.Hour
 
 // AutoUpdater 定期检查 GitHub Releases 并自动更新 Agent。
 type AutoUpdater struct {
+	ctx            context.Context
 	updater        *Updater
 	currentVersion string
 	interval       time.Duration
-	stopCh         chan struct{}
 }
 
 // NewAutoUpdater 创建一个新的自动更新器。
-func NewAutoUpdater(upd *Updater, currentVersion string) *AutoUpdater {
+func NewAutoUpdater(ctx context.Context, upd *Updater, currentVersion string) *AutoUpdater {
 	return &AutoUpdater{
+		ctx:            ctx,
 		updater:        upd,
 		currentVersion: currentVersion,
 		interval:       DefaultCheckInterval,
-		stopCh:         make(chan struct{}),
 	}
 }
 
@@ -35,12 +36,7 @@ func (a *AutoUpdater) Start() {
 
 // Stop 停止自动更新协程。
 func (a *AutoUpdater) Stop() {
-	select {
-	case <-a.stopCh:
-		// already stopped
-	default:
-		close(a.stopCh)
-	}
+	// Context cancellation handles stopping; kept for interface compatibility.
 }
 
 func (a *AutoUpdater) loop() {
@@ -103,7 +99,7 @@ func (a *AutoUpdater) check() {
 // sleep 等待指定时间或被停止。返回 false 表示被停止。
 func (a *AutoUpdater) sleep(d time.Duration) bool {
 	select {
-	case <-a.stopCh:
+	case <-a.ctx.Done():
 		return false
 	case <-time.After(d):
 		return true

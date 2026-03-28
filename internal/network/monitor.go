@@ -1,7 +1,7 @@
 package network
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"log/slog"
 	"math"
@@ -50,23 +50,10 @@ type ProbeResult struct {
 	PacketLoss    float64  `json:"packet_loss"`
 }
 
-// ToMap 将 ProbeResult 转换为 map，用于 API 上报。
-func (r *ProbeResult) ToMap() map[string]interface{} {
-	m := map[string]interface{}{
-		"target_id":   r.TargetID,
-		"time":        r.Time,
-		"packet_loss": r.PacketLoss,
-	}
-	if r.MedianLatency != nil {
-		m["median_latency"] = *r.MedianLatency
-	}
-	if r.MaxLatency != nil {
-		m["max_latency"] = *r.MaxLatency
-	}
-	if r.MinLatency != nil {
-		m["min_latency"] = *r.MinLatency
-	}
-	return m
+// Dispatch 表示后端下发的网络探测目标配置。
+type Dispatch struct {
+	Version string   `json:"version,omitempty"`
+	Targets []Target `json:"targets,omitempty"`
 }
 
 // Target 表示一个网络探测目标。
@@ -81,7 +68,7 @@ type Target struct {
 
 // Monitor 管理网络探测。
 type Monitor struct {
-	stopCh chan struct{} // Main stop signal
+	ctx context.Context
 
 	version string
 	targets []Target
@@ -89,48 +76,41 @@ type Monitor struct {
 	mu             sync.Mutex
 	pendingResults []ProbeResult
 
-	groupStops map[int]chan struct{} // interval -> stop channel
+	groupCancels map[int]context.CancelFunc // interval -> cancel function
 }
 
 // NewMonitor 创建一个新的网络监控器。
-func NewMonitor(stopCh chan struct{}) *Monitor {
+func NewMonitor(ctx context.Context) *Monitor {
 	return &Monitor{
-		stopCh:     stopCh,
-		groupStops: make(map[int]chan struct{}),
+		ctx:          ctx,
+		groupCancels: make(map[int]context.CancelFunc),
 	}
 }
 
 // Version 返回当前目标列表版本。
-func (m *Monitor) Version() *string {
-	if m.version == "" {
-		return nil
-	}
-	return &m.version
+func (m *Monitor) Version() string {
+	return m.version
 }
 
 // HandleDispatch 处理 verify/report 响应中的 network_dispatch。
-func (m *Monitor) HandleDispatch(dispatch map[string]interface{}) {
+func (m *Monitor) HandleDispatch(dispatch *Dispatch) {
 	if dispatch == nil {
 		return
 	}
 
-	newVersion, _ := dispatch["version"].(string)
-	newTargets, hasTargets := dispatch["targets"]
-
-	if hasTargets && newTargets != nil {
-		targets := parseTargets(newTargets)
-		slog.Info("probe targets updated", "version", newVersion, "count", len(targets))
-		m.version = newVersion
-		m.targets = targets
+	if dispatch.Targets != nil {
+		slog.Info("probe targets updated", "version", dispatch.Version, "count", len(dispatch.Targets))
+		m.version = dispatch.Version
+		m.targets = dispatch.Targets
 		m.rescheduleProbes()
-	} else if newVersion != "" {
-		m.version = newVersion
-		slog.Debug("probe targets unchanged", "version", newVersion)
+	} else if dispatch.Version != "" {
+		m.version = dispatch.Version
+		slog.Debug("probe targets unchanged", "version", dispatch.Version)
 	}
 }
 
 // FlushPendingResults 返回并清空所有缓存的探测结果。
-func (m *Monitor) FlushPendingResults() []map[string]interface{} {
+func (m *Monitor) FlushPendingResults() []ProbeResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -138,16 +118,14 @@ func (m *Monitor) FlushPendingResults() []map[string]interface{} {
 		return nil
 	}
 
-	results := make([]map[string]interface{}, len(m.pendingResults))
-	for i, r := range m.pendingResults {
-		results[i] = r.ToMap()
-	}
+	results := make([]ProbeResult, len(m.pendingResults))
+	copy(results, m.pendingResults)
 	m.pendingResults = m.pendingResults[:0]
 	return results
 }
 
 // RequeueResults 将失败的结果重新放回缓冲区。
-func (m *Monitor) RequeueResults(results []map[string]interface{}) {
+func (m *Monitor) RequeueResults(results []ProbeResult) {
 	if len(results) == 0 {
 		return
 	}
@@ -155,41 +133,19 @@ func (m *Monitor) RequeueResults(results []map[string]interface{}) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	restored := make([]ProbeResult, 0, len(results))
-	for _, d := range results {
-		r := ProbeResult{
-			TargetID:   toInt(d["target_id"]),
-			Time:       toInt64(d["time"]),
-			PacketLoss: toFloat64(d["packet_loss"]),
-		}
-		if v, ok := d["median_latency"]; ok {
-			f := toFloat64(v)
-			r.MedianLatency = &f
-		}
-		if v, ok := d["max_latency"]; ok {
-			f := toFloat64(v)
-			r.MaxLatency = &f
-		}
-		if v, ok := d["min_latency"]; ok {
-			f := toFloat64(v)
-			r.MinLatency = &f
-		}
-		restored = append(restored, r)
-	}
-
-	m.pendingResults = append(restored, m.pendingResults...)
+	m.pendingResults = append(results, m.pendingResults...)
 	slog.Debug("requeued probe results", "count", len(results))
 }
 
 // Stop 停止所有探测协程。
 func (m *Monitor) Stop() {
-	m.stopAllProbes()
+	m.stopAllGroups()
 }
 
 // --- 调度 ---
 
 func (m *Monitor) rescheduleProbes() {
-	m.stopAllProbes()
+	m.stopAllGroups()
 
 	// 按间隔分组目标
 	groups := make(map[int][]Target)
@@ -202,10 +158,10 @@ func (m *Monitor) rescheduleProbes() {
 	}
 
 	for interval, targets := range groups {
-		stopCh := make(chan struct{})
-		m.groupStops[interval] = stopCh
+		groupCtx, cancel := context.WithCancel(m.ctx)
+		m.groupCancels[interval] = cancel
 
-		go m.intervalLoop(interval, targets, stopCh)
+		go m.intervalLoop(interval, targets, groupCtx)
 
 		names := make([]string, 0, len(targets))
 		for _, t := range targets {
@@ -223,22 +179,20 @@ func (m *Monitor) rescheduleProbes() {
 	}
 }
 
-func (m *Monitor) stopAllProbes() {
-	for _, ch := range m.groupStops {
-		close(ch)
+func (m *Monitor) stopAllGroups() {
+	for _, cancel := range m.groupCancels {
+		cancel()
 	}
-	m.groupStops = make(map[int]chan struct{})
+	m.groupCancels = make(map[int]context.CancelFunc)
 }
 
-func (m *Monitor) intervalLoop(interval int, targets []Target, stopCh chan struct{}) {
+func (m *Monitor) intervalLoop(interval int, targets []Target, ctx context.Context) {
 	// 等待第一个对齐时刻
 	nextTick := NextAlignedTick(interval, 0)
 	wait := time.Duration(float64(time.Second) * (nextTick - float64(time.Now().Unix())))
 	if wait > 0 {
 		select {
-		case <-stopCh:
-			return
-		case <-m.stopCh:
+		case <-ctx.Done():
 			return
 		case <-time.After(wait):
 		}
@@ -246,9 +200,7 @@ func (m *Monitor) intervalLoop(interval int, targets []Target, stopCh chan struc
 
 	for {
 		select {
-		case <-stopCh:
-			return
-		case <-m.stopCh:
+		case <-ctx.Done():
 			return
 		default:
 		}
@@ -260,9 +212,7 @@ func (m *Monitor) intervalLoop(interval int, targets []Target, stopCh chan struc
 		wait = time.Duration(float64(time.Second) * (nextTick - float64(time.Now().Unix())))
 		if wait > 0 {
 			select {
-			case <-stopCh:
-				return
-			case <-m.stopCh:
+			case <-ctx.Done():
 				return
 			case <-time.After(wait):
 			}
@@ -513,91 +463,4 @@ func ptrFloat(p *float64) float64 {
 		return 0
 	}
 	return *p
-}
-
-// --- 目标解析 ---
-
-func parseTargets(raw interface{}) []Target {
-	list, ok := raw.([]interface{})
-	if !ok {
-		return nil
-	}
-	targets := make([]Target, 0, len(list))
-	for _, item := range list {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		t := Target{
-			ID:       toInt(m["id"]),
-			Name:     toString(m["name"]),
-			Host:     toString(m["host"]),
-			Protocol: toString(m["protocol"]),
-			Interval: toInt(m["interval"]),
-		}
-		if v, ok := m["port"]; ok && v != nil {
-			p := toInt(v)
-			t.Port = &p
-		}
-		if t.Interval <= 0 {
-			t.Interval = 60
-		}
-		targets = append(targets, t)
-	}
-	return targets
-}
-
-func toInt(v interface{}) int {
-	switch n := v.(type) {
-	case float64:
-		return int(n)
-	case int:
-		return n
-	case int64:
-		return int(n)
-	case json.Number:
-		i, _ := n.Int64()
-		return int(i)
-	default:
-		return 0
-	}
-}
-
-func toInt64(v interface{}) int64 {
-	switch n := v.(type) {
-	case float64:
-		return int64(n)
-	case int:
-		return int64(n)
-	case int64:
-		return n
-	case json.Number:
-		i, _ := n.Int64()
-		return i
-	default:
-		return 0
-	}
-}
-
-func toFloat64(v interface{}) float64 {
-	switch n := v.(type) {
-	case float64:
-		return n
-	case int:
-		return float64(n)
-	case int64:
-		return float64(n)
-	case json.Number:
-		f, _ := n.Float64()
-		return f
-	default:
-		return 0
-	}
-}
-
-func toString(v interface{}) string {
-	if v == nil {
-		return ""
-	}
-	return fmt.Sprintf("%v", v)
 }

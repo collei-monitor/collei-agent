@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -65,20 +66,22 @@ func (t *SSHTunnel) closeAll() {
 
 // Manager 管理后端 WebSocket 隧道，用于 Web SSH。
 type Manager struct {
+	ctx     context.Context
 	apiURL  string
 	token   string
 	sshPort int
 
-	mu        sync.Mutex
-	wanted    bool
-	connected bool
-	stopCh    chan struct{} // 通知隧道协程停止的信号
-	doneCh    chan struct{} // maintainTunnel 退出时关闭，用于探测协程是否已结束
+	mu         sync.Mutex
+	wanted     bool
+	connected  bool
+	loopCancel context.CancelFunc // cancels the current maintainTunnel loop
+	doneCh     chan struct{}      // closed when maintainTunnel exits
 }
 
 // NewManager 创建一个新的 SSH 隧道管理器。
-func NewManager(apiURL, token string, sshPort int) *Manager {
+func NewManager(ctx context.Context, apiURL, token string, sshPort int) *Manager {
 	return &Manager{
+		ctx:     ctx,
 		apiURL:  strings.TrimRight(apiURL, "/"),
 		token:   token,
 		sshPort: sshPort,
@@ -132,15 +135,10 @@ func (m *Manager) Stop() {
 
 func (m *Manager) signalStop() {
 	m.mu.Lock()
-	ch := m.stopCh
+	cancel := m.loopCancel
 	m.mu.Unlock()
-	if ch != nil {
-		select {
-		case <-ch:
-			// 已关闭
-		default:
-			close(ch)
-		}
+	if cancel != nil {
+		cancel()
 	}
 }
 
@@ -155,11 +153,12 @@ func (m *Manager) startLoop() {
 			return // 仍在运行
 		}
 	}
-	m.stopCh = make(chan struct{})
+	loopCtx, cancel := context.WithCancel(m.ctx)
+	m.loopCancel = cancel
 	m.doneCh = make(chan struct{})
 	m.mu.Unlock()
 
-	go m.maintainTunnel()
+	go m.maintainTunnel(loopCtx)
 }
 
 func (m *Manager) wsURL() string {
@@ -176,12 +175,8 @@ func (m *Manager) wsURL() string {
 }
 
 // maintainTunnel 使用指数退避策略连接和重连。
-func (m *Manager) maintainTunnel() {
+func (m *Manager) maintainTunnel(ctx context.Context) {
 	delay := 1.0
-
-	m.mu.Lock()
-	stopCh := m.stopCh
-	m.mu.Unlock()
 
 	defer func() {
 		m.mu.Lock()
@@ -226,7 +221,7 @@ func (m *Manager) maintainTunnel() {
 				slog.Warn("SSH tunnel: failed to send capabilities", "error", err)
 			} else {
 				slog.Debug("SSH tunnel: capabilities sent", "ssh_port", m.sshPort)
-				m.handleMessages(ws, stopCh)
+				m.handleMessages(ws, ctx)
 			}
 			ws.Close()
 			m.mu.Lock()
@@ -247,7 +242,7 @@ func (m *Manager) maintainTunnel() {
 		slog.Info("SSH tunnel: reconnecting", "delay_sec", fmt.Sprintf("%.1f", waitTime))
 
 		select {
-		case <-stopCh:
+		case <-ctx.Done():
 			return
 		case <-time.After(time.Duration(waitTime * float64(time.Second))):
 		}
@@ -260,7 +255,7 @@ func (m *Manager) maintainTunnel() {
 }
 
 // handleMessages 处理 WebSocket 消息循环。
-func (m *Manager) handleMessages(ws *websocket.Conn, stopCh chan struct{}) {
+func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 	tun := newSSHTunnel()
 
 	// 跟踪活动的桥接协程
@@ -275,7 +270,7 @@ func (m *Manager) handleMessages(ws *websocket.Conn, stopCh chan struct{}) {
 
 	for {
 		select {
-		case <-stopCh:
+		case <-ctx.Done():
 			return
 		default:
 		}

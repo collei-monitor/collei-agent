@@ -3,32 +3,42 @@ package api
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/collei-monitor/collei-agent/internal/collector"
+	"github.com/collei-monitor/collei-agent/internal/network"
 )
 
 // 默认 HTTP 超时时间。
 const DefaultTimeout = 15 * time.Second
 
-// Error types mirroring the Python hierarchy — 映射 Python 异常层次的错误类型。
+// ErrorKind 标识 API 错误子类型。
+type ErrorKind int
 
-type ApiError struct {
+const (
+	ErrGeneric                   ErrorKind = iota
+	ErrTokenInvalid                        // 401
+	ErrServerNotApproved                   // 403
+	ErrRegistrationNotConfigured           // 503
+)
+
+// APIError 表示后端返回的非成功 HTTP 响应。
+type APIError struct {
+	Kind       ErrorKind
 	StatusCode int
 	Detail     string
 	Headers    http.Header
 }
 
-func (e *ApiError) Error() string {
+func (e *APIError) Error() string {
 	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Detail)
 }
-
-type TokenInvalid struct{ ApiError }
-type ServerNotApproved struct{ ApiError }
-type RegistrationNotConfigured struct{ ApiError }
 
 // 响应类型。
 
@@ -38,19 +48,32 @@ type RegisterResponse struct {
 }
 
 type VerifyResponse struct {
-	UUID            string                 `json:"uuid"`
-	Token           string                 `json:"token"`
-	IsApproved      int                    `json:"is_approved"`
-	NetworkDispatch map[string]interface{} `json:"network_dispatch,omitempty"`
+	UUID            string            `json:"uuid"`
+	Token           string            `json:"token"`
+	IsApproved      int               `json:"is_approved"`
+	NetworkDispatch *network.Dispatch `json:"network_dispatch,omitempty"`
+}
+
+// SSHTunnelDirective 表示后端对 SSH 隧道的控制指令。
+type SSHTunnelDirective struct {
+	Connect *bool `json:"connect,omitempty"`
+}
+
+// PendingTask 表示后端下发的待执行任务。
+type PendingTask struct {
+	ExecutionID string `json:"execution_id"`
+	Type        string `json:"type"`
+	TimeoutSec  int    `json:"timeout_sec"`
+	Payload     string `json:"payload"`
 }
 
 type ReportResponse struct {
-	UUID            string                   `json:"uuid"`
-	IsApproved      int                      `json:"is_approved"`
-	Received        bool                     `json:"received"`
-	NetworkDispatch map[string]interface{}   `json:"network_dispatch,omitempty"`
-	SSHTunnel       map[string]interface{}   `json:"ssh_tunnel,omitempty"`
-	PendingTasks    []map[string]interface{} `json:"pending_tasks,omitempty"`
+	UUID            string              `json:"uuid"`
+	IsApproved      int                 `json:"is_approved"`
+	Received        bool                `json:"received"`
+	NetworkDispatch *network.Dispatch   `json:"network_dispatch,omitempty"`
+	SSHTunnel       *SSHTunnelDirective `json:"ssh_tunnel,omitempty"`
+	PendingTasks    []PendingTask       `json:"pending_tasks,omitempty"`
 }
 
 // Client 是 Collei API HTTP 客户端。
@@ -79,16 +102,17 @@ func (c *Client) Close() {
 }
 
 // Register 使用全局注册令牌执行自动注册。
-func (c *Client) Register(regToken, name string, hardware map[string]interface{}, version string) (*RegisterResponse, error) {
-	payload := map[string]interface{}{
-		"reg_token": regToken,
-		"name":      name,
-	}
-	for k, v := range hardware {
-		payload[k] = v
-	}
-	if version != "" {
-		payload["version"] = version
+func (c *Client) Register(regToken, name string, hardware *collector.HardwareInfo, version string) (*RegisterResponse, error) {
+	payload := &struct {
+		RegToken string `json:"reg_token"`
+		Name     string `json:"name,omitempty"`
+		Version  string `json:"version,omitempty"`
+		*collector.HardwareInfo
+	}{
+		RegToken:     regToken,
+		Name:         name,
+		Version:      version,
+		HardwareInfo: hardware,
 	}
 
 	var resp RegisterResponse
@@ -99,18 +123,17 @@ func (c *Client) Register(regToken, name string, hardware map[string]interface{}
 }
 
 // Verify 执行被动注册或身份验证。
-func (c *Client) Verify(token, name string, hardware map[string]interface{}, version string) (*VerifyResponse, error) {
-	payload := map[string]interface{}{
-		"token": token,
-	}
-	if name != "" {
-		payload["name"] = name
-	}
-	for k, v := range hardware {
-		payload[k] = v
-	}
-	if version != "" {
-		payload["version"] = version
+func (c *Client) Verify(token, name string, hardware *collector.HardwareInfo, version string) (*VerifyResponse, error) {
+	payload := &struct {
+		Token   string `json:"token"`
+		Name    string `json:"name,omitempty"`
+		Version string `json:"version,omitempty"`
+		*collector.HardwareInfo
+	}{
+		Token:        token,
+		Name:         name,
+		Version:      version,
+		HardwareInfo: hardware,
 	}
 
 	var resp VerifyResponse
@@ -120,43 +143,43 @@ func (c *Client) Verify(token, name string, hardware map[string]interface{}, ver
 	return &resp, nil
 }
 
+// ReportParams 聚合 Report 所需的全部参数。
+type ReportParams struct {
+	Token          string
+	Hardware       *collector.HardwareInfo
+	LoadData       *collector.LoadData
+	TotalFlowIn    int64
+	TotalFlowOut   int64
+	DiskIO         []collector.DiskPartition
+	NetIO          []collector.NetInterface
+	NetworkVersion string
+	NetworkData    []network.ProbeResult
+}
+
+type reportPayload struct {
+	Token string `json:"token"`
+	*collector.HardwareInfo
+	LoadData       *collector.LoadData       `json:"load_data,omitempty"`
+	TotalFlowIn    int64                     `json:"total_flow_in"`
+	TotalFlowOut   int64                     `json:"total_flow_out"`
+	CurrentDiskIO  []collector.DiskPartition `json:"current_disk_io,omitempty"`
+	CurrentNetIO   []collector.NetInterface  `json:"current_net_io,omitempty"`
+	NetworkVersion string                    `json:"network_version,omitempty"`
+	NetworkData    []network.ProbeResult     `json:"network_data,omitempty"`
+}
+
 // Report 向服务端发送监控数据。
-func (c *Client) Report(
-	token string,
-	hardware map[string]interface{},
-	loadData map[string]interface{},
-	totalFlowIn, totalFlowOut *int64,
-	currentDiskIO interface{},
-	currentNetIO interface{},
-	networkVersion *string,
-	networkData []map[string]interface{},
-) (*ReportResponse, error) {
-	payload := map[string]interface{}{
-		"token": token,
-	}
-	for k, v := range hardware {
-		payload[k] = v
-	}
-	if loadData != nil {
-		payload["load_data"] = loadData
-	}
-	if totalFlowIn != nil {
-		payload["total_flow_in"] = *totalFlowIn
-	}
-	if totalFlowOut != nil {
-		payload["total_flow_out"] = *totalFlowOut
-	}
-	if currentDiskIO != nil {
-		payload["current_disk_io"] = currentDiskIO
-	}
-	if currentNetIO != nil {
-		payload["current_net_io"] = currentNetIO
-	}
-	if networkVersion != nil {
-		payload["network_version"] = *networkVersion
-	}
-	if len(networkData) > 0 {
-		payload["network_data"] = networkData
+func (c *Client) Report(params *ReportParams) (*ReportResponse, error) {
+	payload := &reportPayload{
+		Token:          params.Token,
+		HardwareInfo:   params.Hardware,
+		LoadData:       params.LoadData,
+		TotalFlowIn:    params.TotalFlowIn,
+		TotalFlowOut:   params.TotalFlowOut,
+		CurrentDiskIO:  params.DiskIO,
+		CurrentNetIO:   params.NetIO,
+		NetworkVersion: params.NetworkVersion,
+		NetworkData:    params.NetworkData,
 	}
 
 	var resp ReportResponse
@@ -168,21 +191,22 @@ func (c *Client) Report(
 
 // ReportTask 上报任务执行结果。
 func (c *Client) ReportTask(executionID, status string, exitCode *int, output *string) error {
-	payload := map[string]interface{}{
-		"execution_id": executionID,
-		"status":       status,
-	}
-	if exitCode != nil {
-		payload["exit_code"] = *exitCode
-	}
-	if output != nil {
-		payload["output"] = *output
+	payload := &struct {
+		ExecutionID string  `json:"execution_id"`
+		Status      string  `json:"status"`
+		ExitCode    *int    `json:"exit_code,omitempty"`
+		Output      *string `json:"output,omitempty"`
+	}{
+		ExecutionID: executionID,
+		Status:      status,
+		ExitCode:    exitCode,
+		Output:      output,
 	}
 	return c.post(c.agentBase+"/tasks/report", payload, nil)
 }
 
 // post 发送 POST 请求，解析 JSON 响应并处理错误。
-func (c *Client) post(url string, payload map[string]interface{}, result interface{}) error {
+func (c *Client) post(url string, payload any, result any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal payload: %w", err)
@@ -205,8 +229,8 @@ func (c *Client) post(url string, payload map[string]interface{}, result interfa
 	return c.handleResponse(resp, result)
 }
 
-// handleResponse 解析 HTTP 响应并抛出类型化错误。
-func (c *Client) handleResponse(resp *http.Response, result interface{}) error {
+// handleResponse 解析 HTTP 响应并返回类型化错误。
+func (c *Client) handleResponse(resp *http.Response, result any) error {
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("read response: %w", err)
@@ -222,7 +246,7 @@ func (c *Client) handleResponse(resp *http.Response, result interface{}) error {
 	}
 
 	detail := extractDetail(respBody, resp)
-	base := ApiError{
+	apiErr := &APIError{
 		StatusCode: resp.StatusCode,
 		Detail:     detail,
 		Headers:    resp.Header,
@@ -230,14 +254,14 @@ func (c *Client) handleResponse(resp *http.Response, result interface{}) error {
 
 	switch resp.StatusCode {
 	case 401:
-		return &TokenInvalid{base}
+		apiErr.Kind = ErrTokenInvalid
 	case 403:
-		return &ServerNotApproved{base}
+		apiErr.Kind = ErrServerNotApproved
 	case 503:
-		return &RegistrationNotConfigured{base}
-	default:
-		return &base
+		apiErr.Kind = ErrRegistrationNotConfigured
 	}
+
+	return apiErr
 }
 
 // extractDetail 从响应中提取可读的错误描述。
@@ -278,30 +302,23 @@ func extractDetail(body []byte, resp *http.Response) string {
 	return fmt.Sprintf("%d", resp.StatusCode)
 }
 
-// IsTokenInvalid 检查错误是否为 TokenInvalid 类型。
+// IsTokenInvalid 检查错误是否为 token 无效错误。
 func IsTokenInvalid(err error) bool {
-	_, ok := err.(*TokenInvalid)
-	return ok
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Kind == ErrTokenInvalid
 }
 
-// IsServerNotApproved 检查错误是否为 ServerNotApproved 类型。
+// IsServerNotApproved 检查错误是否为服务器未审批错误。
 func IsServerNotApproved(err error) bool {
-	_, ok := err.(*ServerNotApproved)
-	return ok
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Kind == ErrServerNotApproved
 }
 
-// GetApiError 从任意 API 错误类型中提取 ApiError。
-func GetApiError(err error) (*ApiError, bool) {
-	switch e := err.(type) {
-	case *ApiError:
-		return e, true
-	case *TokenInvalid:
-		return &e.ApiError, true
-	case *ServerNotApproved:
-		return &e.ApiError, true
-	case *RegistrationNotConfigured:
-		return &e.ApiError, true
-	default:
-		return nil, false
+// GetAPIError 从错误中提取 APIError。
+func GetAPIError(err error) (*APIError, bool) {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr, true
 	}
+	return nil, false
 }

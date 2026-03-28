@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -99,15 +100,15 @@ func main() {
 		Use:   "collect",
 		Short: "Test system data collection (no backend connection)",
 		Run: func(cmd *cobra.Command, args []string) {
-			c := collector.NewSystemCollector("", "")
+			c := collector.NewSystemCollector(context.Background(), "", "")
 
 			fmt.Println("=== Hardware Info ===")
 			hw := c.CollectHardware()
-			printJSON(hw.ToMap())
+			printJSON(hw)
 
 			fmt.Println("\n=== Load Data (first sample) ===")
 			load1 := c.CollectLoad()
-			printJSON(load1.ToMap())
+			printJSON(load1)
 
 			flowIn, flowOut := c.CollectTotalFlow()
 			fmt.Println("\n=== Cumulative Traffic ===")
@@ -119,7 +120,7 @@ func main() {
 
 			fmt.Println("\n=== Load Data (second sample) ===")
 			load2 := c.CollectLoad()
-			printJSON(load2.ToMap())
+			printJSON(load2)
 		},
 	}
 

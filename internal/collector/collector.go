@@ -41,48 +41,6 @@ type HardwareInfo struct {
 	BootTime       int64  `json:"boot_time,omitempty"`
 }
 
-// ToMap 将 HardwareInfo 转换为 map，过滤零值/空值。
-func (h *HardwareInfo) ToMap() map[string]interface{} {
-	m := make(map[string]interface{})
-	if h.CPUName != "" {
-		m["cpu_name"] = h.CPUName
-	}
-	if h.Virtualization != "" {
-		m["virtualization"] = h.Virtualization
-	}
-	if h.Arch != "" {
-		m["arch"] = h.Arch
-	}
-	if h.CPUCores > 0 {
-		m["cpu_cores"] = h.CPUCores
-	}
-	if h.OS != "" {
-		m["os"] = h.OS
-	}
-	if h.KernelVersion != "" {
-		m["kernel_version"] = h.KernelVersion
-	}
-	if h.IPv4 != "" {
-		m["ipv4"] = h.IPv4
-	}
-	if h.IPv6 != "" {
-		m["ipv6"] = h.IPv6
-	}
-	if h.MemTotal > 0 {
-		m["mem_total"] = h.MemTotal
-	}
-	if h.SwapTotal > 0 {
-		m["swap_total"] = h.SwapTotal
-	}
-	if h.DiskTotal > 0 {
-		m["disk_total"] = h.DiskTotal
-	}
-	if h.BootTime > 0 {
-		m["boot_time"] = h.BootTime
-	}
-	return m
-}
-
 // DiskPartition 包含单个磁盘分区的状态快照。
 type DiskPartition struct {
 	Mount string `json:"mount"`
@@ -115,27 +73,9 @@ type LoadData struct {
 	Process   int     `json:"process"`
 }
 
-// ToMap 将 LoadData 转换为 map。
-func (l *LoadData) ToMap() map[string]interface{} {
-	return map[string]interface{}{
-		"cpu":        l.CPU,
-		"ram":        l.RAM,
-		"ram_total":  l.RAMTotal,
-		"swap":       l.Swap,
-		"swap_total": l.SwapTotal,
-		"load":       l.Load,
-		"disk":       l.Disk,
-		"disk_total": l.DiskTotal,
-		"net_in":     l.NetIn,
-		"net_out":    l.NetOut,
-		"tcp":        l.TCP,
-		"udp":        l.UDP,
-		"process":    l.Process,
-	}
-}
-
 // SystemCollector 负责采集系统指标。
 type SystemCollector struct {
+	ctx              context.Context
 	networkInterface string
 	netStateFile     string
 
@@ -143,7 +83,7 @@ type SystemCollector struct {
 	currentNet  *[2]int64
 	prevNetTime *float64
 
-	lastHW     map[string]interface{}
+	lastHW     *HardwareInfo
 	cachedHW   *HardwareInfo
 	lastHWTime float64
 	hwCacheTTL float64
@@ -153,8 +93,9 @@ type SystemCollector struct {
 }
 
 // NewSystemCollector 创建一个新的采集器。
-func NewSystemCollector(networkInterface, stateDir string) *SystemCollector {
+func NewSystemCollector(ctx context.Context, networkInterface, stateDir string) *SystemCollector {
 	c := &SystemCollector{
+		ctx:              ctx,
 		networkInterface: networkInterface,
 		hwCacheTTL:       300.0, // 5 minutes
 	}
@@ -199,14 +140,14 @@ func (c *SystemCollector) CollectHardware() *HardwareInfo {
 	return hw
 }
 
-// CollectHardwareIfChanged 仅在硬件信息发生变化时返回 map。
-func (c *SystemCollector) CollectHardwareIfChanged() map[string]interface{} {
-	hw := c.CollectHardware().ToMap()
-	if !mapsEqual(hw, c.lastHW) {
-		c.lastHW = hw
-		return hw
+// CollectHardwareIfChanged 仅在硬件信息发生变化时返回新值。
+func (c *SystemCollector) CollectHardwareIfChanged() *HardwareInfo {
+	hw := c.CollectHardware()
+	if c.lastHW != nil && *hw == *c.lastHW {
+		return nil
 	}
-	return nil
+	c.lastHW = hw
+	return hw
 }
 
 // CollectLoad 采集实时监控指标。
@@ -336,6 +277,11 @@ func (c *SystemCollector) cpuSamplingLoop() {
 	// 初始化
 	cpu.Percent(0, false)
 	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		default:
+		}
 		pct, err := cpu.Percent(time.Second, false)
 		if err == nil && len(pct) > 0 {
 			c.cpuMu.Lock()
@@ -678,16 +624,4 @@ func (c *SystemCollector) saveNetState(rx, tx int64) {
 
 func monotonicSeconds() float64 {
 	return float64(time.Now().UnixNano()) / 1e9
-}
-
-func mapsEqual(a, b map[string]interface{}) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if bv, ok := b[k]; !ok || fmt.Sprintf("%v", v) != fmt.Sprintf("%v", bv) {
-			return false
-		}
-	}
-	return true
 }
