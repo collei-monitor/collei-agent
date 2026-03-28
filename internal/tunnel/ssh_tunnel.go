@@ -262,6 +262,14 @@ func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 	var wg sync.WaitGroup
 	var pendingSessionID string
 
+	// 当 context 取消时关闭 WS，让 ReadMessage 自然返回错误退出循环。
+	// gorilla/websocket 在 ReadMessage 返回错误后不允许再次读取（会 panic），
+	// 因此不能使用 SetReadDeadline + continue 模式来检查停止信号。
+	go func() {
+		<-ctx.Done()
+		ws.Close()
+	}()
+
 	defer func() {
 		tun.closeAll()
 		wg.Wait()
@@ -269,22 +277,14 @@ func (m *Manager) handleMessages(ws *websocket.Conn, ctx context.Context) {
 	}()
 
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		default:
-		}
-
-		// 设置读取超时以便定期检查停止通道
-		ws.SetReadDeadline(time.Now().Add(30 * time.Second))
 		msgType, msg, err := ws.ReadMessage()
 		if err != nil {
 			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 				slog.Info("SSH tunnel: WebSocket closed normally")
 				return
 			}
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				continue // 读取超时，检查停止信号并继续循环
+			if ctx.Err() != nil {
+				return // context cancelled, expected close
 			}
 			slog.Warn("SSH tunnel: read error", "error", err)
 			return
