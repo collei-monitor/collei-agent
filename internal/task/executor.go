@@ -181,29 +181,33 @@ func (e *Executor) execScript(execID string, payload map[string]interface{}, tim
 }
 
 func (e *Executor) execUpgrade(execID string, payload map[string]interface{}) {
-	version, _ := payload["version"].(string)
-	downloadURL, _ := payload["url"].(string)
-	checksum, _ := payload["checksum"].(string)
+	currentVersion := e.updater.CurrentVersion()
 
-	if version == "" || downloadURL == "" {
+	// 查询 GitHub 最新版本
+	checkMsg := fmt.Sprintf("Checking GitHub for latest version (current: %s)", currentVersion)
+	e.reportStatus(execID, "running", nil, &checkMsg)
+
+	release, err := e.updater.CheckGitHubLatest()
+	if err != nil {
 		e.reportStatus(execID, "failed", intPtr(-1),
-			strPtr("Missing required fields: version and url"))
+			strPtr(fmt.Sprintf("Failed to check latest version: %v", err)))
 		return
 	}
 
-	currentVersion := e.updater.CurrentVersion()
-
-	// 已是目标版本
-	if !updater.NeedsUpdate(currentVersion, version) {
-		output := fmt.Sprintf("Already at version %s", currentVersion)
+	// 已是最新版本
+	if !updater.NeedsUpdate(currentVersion, release.Tag) {
+		output := fmt.Sprintf("Already at latest version %s", currentVersion)
 		e.reportStatus(execID, "success", intPtr(0), &output)
 		return
 	}
 
+	downloadMsg := fmt.Sprintf("New version %s found, downloading...", release.Tag)
+	e.reportStatus(execID, "running", nil, &downloadMsg)
+
 	// 写入升级状态文件（重启后用于上报结果）
 	state := &config.UpgradeState{
 		ExecutionID:     execID,
-		TargetVersion:   version,
+		TargetVersion:   release.Tag,
 		PreviousVersion: currentVersion,
 		StartedAt:       time.Now().Unix(),
 	}
@@ -214,14 +218,14 @@ func (e *Executor) execUpgrade(execID string, payload map[string]interface{}) {
 	}
 
 	// 执行下载和替换
-	if err := e.updater.Upgrade(downloadURL, checksum); err != nil {
+	if err := e.updater.Upgrade(release.DownloadURL, ""); err != nil {
 		config.RemoveUpgradeState(e.updater.ConfigDir())
 		e.reportStatus(execID, "failed", intPtr(-1),
 			strPtr(fmt.Sprintf("Upgrade failed: %v", err)))
 		return
 	}
 
-	output := fmt.Sprintf("Binary replaced, restarting (%s -> %s)", currentVersion, version)
+	output := fmt.Sprintf("Binary replaced, restarting (%s -> %s)", currentVersion, release.Tag)
 	e.reportStatus(execID, "running", nil, &output)
 
 	// 触发重启（重启后新版本会读取状态文件并上报最终结果）
