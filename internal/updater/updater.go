@@ -130,8 +130,8 @@ func (u *Updater) Upgrade(downloadURL, checksum string) error {
 		return fmt.Errorf("get executable path: %w", err)
 	}
 
-	// 下载新二进制
-	tmpPath, err := u.download(downloadURL)
+	// 下载新二进制（写入当前二进制所在目录，避免 /tmp noexec 问题）
+	tmpPath, err := u.download(downloadURL, filepath.Dir(currentPath))
 	if err != nil {
 		return fmt.Errorf("download: %w", err)
 	}
@@ -182,8 +182,9 @@ func TriggerRestart() {
 // --- 内部方法 ---
 
 // download 下载文件到临时路径。优先直连，失败后尝试面板代理。
-func (u *Updater) download(downloadURL string) (string, error) {
-	tmpFile, err := os.CreateTemp("", "collei-agent-update-*")
+// dir 指定临时文件所在目录，避免 /tmp noexec 导致后续验证失败。
+func (u *Updater) download(downloadURL, dir string) (string, error) {
+	tmpFile, err := os.CreateTemp(dir, ".collei-agent-update-*")
 	if err != nil {
 		return "", fmt.Errorf("create temp file: %w", err)
 	}
@@ -298,8 +299,11 @@ func verifyChecksum(path, expected string) error {
 	return nil
 }
 
-// verifyBinary 运行新二进制的 version 命令来验证其可执行性。
+// verifyBinary 设置执行权限并运行新二进制的 version 命令来验证其可执行性。
 func verifyBinary(path string) error {
+	if err := os.Chmod(path, 0755); err != nil {
+		return fmt.Errorf("chmod: %w", err)
+	}
 	cmd := exec.Command(path, "version")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
