@@ -710,10 +710,10 @@ do_update() {
         exit 1
     fi
 
-    # 获取当前版本
+    # 获取当前版本（使用 version 子命令，仅取第一个字段即版本号）
     local current_version=""
-    if "$binary" --version &>/dev/null; then
-        current_version=$("$binary" --version 2>/dev/null || echo "未知")
+    if "$binary" version &>/dev/null; then
+        current_version=$("$binary" version 2>/dev/null | awk 'NR==1{print $NF}')
         info "当前版本: ${current_version}"
     fi
 
@@ -731,9 +731,13 @@ do_update() {
     local target_tag=""
 
     # 使用面板代理时跳过 GitHub API 查询（目标机器可能无法访问 GitHub）
+    # 注意：proxy-download + latest 时无法预知目标版本号，跳过版本比对
     if [[ "$PROXY_DOWNLOAD" == true ]]; then
-        target_tag="$VERSION"
-        info "使用面板代理下载（版本: ${target_tag}）"
+        target_tag=""
+        if [[ "$VERSION" != "latest" ]]; then
+            target_tag="$VERSION"
+        fi
+        info "使用面板代理下载（版本: ${VERSION})"  
     elif [[ "$VERSION" == "latest" ]]; then
         local api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
         local release_info
@@ -757,8 +761,8 @@ do_update() {
         info "目标版本: ${target_tag}"
     fi
 
-    # 检查是否与当前版本相同
-    if [[ -n "$current_version" && "$current_version" == "$target_tag" ]]; then
+    # 检查是否与当前版本相同（target_tag 为空表示无法预知目标版本，跳过此检查）
+    if [[ -n "$target_tag" && -n "$current_version" && "$current_version" == "$target_tag" ]]; then
         info "当前已是最新版本（${target_tag}），无需更新"
         return
     fi
@@ -840,8 +844,8 @@ do_update() {
 
     # 显示新版本
     local new_version=""
-    if "$binary" --version &>/dev/null; then
-        new_version=$("$binary" --version 2>/dev/null || echo "未知")
+    if "$binary" version &>/dev/null; then
+        new_version=$("$binary" version 2>/dev/null | awk 'NR==1{print $NF}')
     fi
 
     echo ""
