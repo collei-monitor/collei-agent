@@ -126,6 +126,8 @@ func (c *Client) Report(
 	hardware map[string]interface{},
 	loadData map[string]interface{},
 	totalFlowIn, totalFlowOut *int64,
+	currentDiskIO interface{},
+	currentNetIO interface{},
 	networkVersion *string,
 	networkData []map[string]interface{},
 ) (*ReportResponse, error) {
@@ -143,6 +145,12 @@ func (c *Client) Report(
 	}
 	if totalFlowOut != nil {
 		payload["total_flow_out"] = *totalFlowOut
+	}
+	if currentDiskIO != nil {
+		payload["current_disk_io"] = currentDiskIO
+	}
+	if currentNetIO != nil {
+		payload["current_net_io"] = currentNetIO
 	}
 	if networkVersion != nil {
 		payload["network_version"] = *networkVersion

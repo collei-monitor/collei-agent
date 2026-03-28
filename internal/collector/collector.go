@@ -83,6 +83,21 @@ func (h *HardwareInfo) ToMap() map[string]interface{} {
 	return m
 }
 
+// DiskPartition 包含单个磁盘分区的状态快照。
+type DiskPartition struct {
+	Mount string `json:"mount"`
+	FS    string `json:"fs"`
+	Total int64  `json:"total"`
+	Used  int64  `json:"used"`
+}
+
+// NetInterface 包含单个网卡接口的累计收发流量。
+type NetInterface struct {
+	Name    string `json:"name"`
+	RxBytes int64  `json:"rx_bytes"`
+	TxBytes int64  `json:"tx_bytes"`
+}
+
 // LoadData 包含实时监控数据。
 type LoadData struct {
 	CPU      float64 `json:"cpu"`
@@ -233,6 +248,70 @@ func (c *SystemCollector) CollectLoad() *LoadData {
 		UDP:       udpCount,
 		Process:   getProcessCount(),
 	}
+}
+
+// CollectDiskIO 采集当前磁盘分区状态快照，过滤虚拟文件系统。
+func (c *SystemCollector) CollectDiskIO() []DiskPartition {
+	parts, err := disk.Partitions(false)
+	if err != nil {
+		slog.Warn("failed to get disk partitions", "error", err)
+		return nil
+	}
+
+	virtualFS := map[string]bool{
+		"tmpfs": true, "devtmpfs": true, "proc": true, "sysfs": true,
+		"devpts": true, "cgroup": true, "cgroup2": true, "pstore": true,
+		"securityfs": true, "debugfs": true, "configfs": true,
+		"fusectl": true, "hugetlbfs": true, "mqueue": true,
+		"efivarfs": true, "binfmt_misc": true, "tracefs": true,
+		"overlay": true, "squashfs": true,
+	}
+
+	var result []DiskPartition
+	seen := make(map[string]bool)
+	for _, p := range parts {
+		if virtualFS[p.Fstype] {
+			continue
+		}
+		if seen[p.Mountpoint] {
+			continue
+		}
+		seen[p.Mountpoint] = true
+
+		usage, err := disk.Usage(p.Mountpoint)
+		if err != nil || usage.Total == 0 {
+			continue
+		}
+		result = append(result, DiskPartition{
+			Mount: p.Mountpoint,
+			FS:    p.Fstype,
+			Total: int64(usage.Total),
+			Used:  int64(usage.Used),
+		})
+	}
+	return result
+}
+
+// CollectNetIO 采集当前网卡接口累计收发流量快照。
+func (c *SystemCollector) CollectNetIO() []NetInterface {
+	counters, err := gnet.IOCounters(true)
+	if err != nil {
+		slog.Warn("failed to get net IO counters", "error", err)
+		return nil
+	}
+
+	var result []NetInterface
+	for _, ctr := range counters {
+		if ctr.BytesRecv == 0 && ctr.BytesSent == 0 {
+			continue
+		}
+		result = append(result, NetInterface{
+			Name:    ctr.Name,
+			RxBytes: int64(ctr.BytesRecv),
+			TxBytes: int64(ctr.BytesSent),
+		})
+	}
+	return result
 }
 
 // CollectTotalFlow 返回自启动以来的累计网络字节数（rx, tx）。

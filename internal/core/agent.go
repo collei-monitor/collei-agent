@@ -314,6 +314,8 @@ func (a *Agent) reportLoop() {
 			hwChanges := a.collector.CollectHardwareIfChanged()
 			flowIn, flowOut := a.collector.CollectTotalFlow()
 			totalFlowIn, totalFlowOut := &flowIn, &flowOut
+			diskIO := a.collector.CollectDiskIO()
+			netIO := a.collector.CollectNetIO()
 			networkResults = a.netMonitor.FlushPendingResults()
 
 			var networkData []map[string]interface{}
@@ -321,11 +323,20 @@ func (a *Agent) reportLoop() {
 				networkData = networkResults
 			}
 
+			var currentDiskIO, currentNetIO interface{}
+			if len(diskIO) > 0 {
+				currentDiskIO = diskIO
+			}
+			if len(netIO) > 0 {
+				currentNetIO = netIO
+			}
+
 			resp, err := a.apiClient.Report(
 				a.Config.Token,
 				hwChanges,
 				load.ToMap(),
 				totalFlowIn, totalFlowOut,
+				currentDiskIO, currentNetIO,
 				a.netMonitor.Version(),
 				networkData,
 			)
