@@ -30,13 +30,14 @@ func main() {
 
 	// --- run 子命令 ---
 	var (
-		url        string
-		token      string
-		regToken   string
-		name       string
-		configPath string
-		interval   float64
-		force      bool
+		url          string
+		token        string
+		regToken     string
+		name         string
+		configPath   string
+		interval     float64
+		force        bool
+		noAutoUpdate bool
 	)
 	runCmd := &cobra.Command{
 		Use:   "run",
@@ -66,6 +67,9 @@ func main() {
 			if force {
 				cfg.ForceRegister = true
 			}
+			if noAutoUpdate {
+				cfg.AutoUpdate = false
+			}
 
 			// 验证配置
 			if cfg.ServerURL == "" {
@@ -88,6 +92,7 @@ func main() {
 	runCmd.Flags().StringVar(&configPath, "config", "", "Config file path")
 	runCmd.Flags().Float64Var(&interval, "interval", 3.0, "Report interval in seconds")
 	runCmd.Flags().BoolVar(&force, "force", false, "Force re-registration")
+	runCmd.Flags().BoolVar(&noAutoUpdate, "no-auto-update", false, "Disable automatic version checks")
 
 	// --- collect 子命令 ---
 	collectCmd := &cobra.Command{

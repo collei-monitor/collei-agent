@@ -24,6 +24,7 @@ type persistedConfig struct {
 	Token            string     `yaml:"token,omitempty"`
 	NetworkInterface string     `yaml:"network_interface,omitempty"`
 	SSH              *SSHConfig `yaml:"ssh,omitempty"`
+	AutoUpdate       *bool      `yaml:"auto_update,omitempty"`
 }
 
 // AgentConfig 存储完整的 Agent 配置。
@@ -34,6 +35,7 @@ type AgentConfig struct {
 	Token            string
 	NetworkInterface string
 	SSH              SSHConfig
+	AutoUpdate       bool
 
 	// 仅运行时字段（不持久化）
 	RegToken       string
@@ -127,6 +129,10 @@ func (c *AgentConfig) Save(path string) error {
 	if c.SSH.Enabled {
 		p.SSH = &c.SSH
 	}
+	if !c.AutoUpdate {
+		v := false
+		p.AutoUpdate = &v
+	}
 
 	data, err := yaml.Marshal(p)
 	if err != nil {
@@ -150,6 +156,7 @@ func Load(path string) *AgentConfig {
 
 	cfg := &AgentConfig{
 		SSH:            SSHConfig{Port: 22},
+		AutoUpdate:     true,
 		ReportInterval: DefaultReportInterval,
 		VerifyInterval: DefaultVerifyInterval,
 		ConfigPath:     path,
@@ -177,6 +184,9 @@ func Load(path string) *AgentConfig {
 	cfg.NetworkInterface = p.NetworkInterface
 	if p.SSH != nil {
 		cfg.SSH = *p.SSH
+	}
+	if p.AutoUpdate != nil {
+		cfg.AutoUpdate = *p.AutoUpdate
 	}
 
 	slog.Info("config loaded", "path", path)

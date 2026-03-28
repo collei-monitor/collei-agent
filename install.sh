@@ -48,6 +48,7 @@ ENABLE_SSH=false
 SETUP_CA=false
 FORCE=false
 PROXY_DOWNLOAD=false
+NO_AUTO_UPDATE=false
 INSTALL_DIR=""
 CONFIG_DIR=""
 VERSION="latest"
@@ -309,6 +310,8 @@ parse_args() {
                 SETUP_CA=true; shift ;;
             --force)
                 FORCE=true; shift ;;
+            --no-auto-update)
+                NO_AUTO_UPDATE=true; shift ;;
             --proxy-download)
                 PROXY_DOWNLOAD=true; shift ;;
             --install-dir)
@@ -355,6 +358,7 @@ update 选项:
   --enable-ssh            启用 Web SSH 隧道
   --setup-ca              配置 SSH CA 免密登录（需 root，需搭配 --enable-ssh）
   --force                 强制重新注册
+  --no-auto-update        禁用自动版本检查更新
   --proxy-download        通过面板代理下载 Agent 二进制（而非直连 GitHub）
   --install-dir <DIR>     二进制安装目录
   --config-dir <DIR>      配置文件目录
@@ -554,6 +558,9 @@ generate_config() {
             echo "  enabled: true"
             echo "  port: ${ssh_port}"
             echo "  ca_configured: ${ca_configured}"
+        fi
+        if [[ "$NO_AUTO_UPDATE" == true ]]; then
+            echo "auto_update: false"
         fi
     } > "$config_file"
 

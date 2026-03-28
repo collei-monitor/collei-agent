@@ -18,6 +18,7 @@ import (
 	"github.com/collei-monitor/collei-agent/internal/network"
 	"github.com/collei-monitor/collei-agent/internal/task"
 	"github.com/collei-monitor/collei-agent/internal/tunnel"
+	"github.com/collei-monitor/collei-agent/internal/updater"
 )
 
 // Version 在编译时通过 ldflags 设置。
@@ -63,11 +64,13 @@ type Agent struct {
 	stopCh  chan struct{}
 	once    sync.Once
 
-	apiClient  *api.Client
-	collector  *collector.SystemCollector
-	netMonitor *network.Monitor
-	taskExec   *task.Executor
-	sshManager *tunnel.Manager
+	apiClient   *api.Client
+	collector   *collector.SystemCollector
+	netMonitor  *network.Monitor
+	taskExec    *task.Executor
+	sshManager  *tunnel.Manager
+	autoUpdater *updater.AutoUpdater
+	stateDir    string
 }
 
 // New 创建一个新的 Agent 实例。
@@ -82,6 +85,7 @@ func New(cfg *config.AgentConfig) *Agent {
 		Config:     cfg,
 		State:      StateInit,
 		stopCh:     stopCh,
+		stateDir:   stateDir,
 		collector:  collector.NewSystemCollector(cfg.NetworkInterface, stateDir),
 		netMonitor: network.NewMonitor(stopCh),
 	}
@@ -96,7 +100,21 @@ func (a *Agent) Run() {
 	slog.Info("Backend", "url", a.Config.ServerURL)
 
 	a.apiClient = api.NewClient(a.Config.ServerURL, 0)
-	a.taskExec = task.NewExecutor(a.apiClient)
+
+	upd := updater.NewUpdater(a.stateDir, a.Config.ServerURL, a.Config.Token, Version)
+	a.taskExec = task.NewExecutor(a.apiClient, upd)
+
+	// 检查上次升级结果
+	a.checkUpgradeResult(upd)
+
+	// 启动自动更新
+	if a.Config.AutoUpdate {
+		a.autoUpdater = updater.NewAutoUpdater(upd, Version)
+		a.autoUpdater.Start()
+		slog.Info("auto-update enabled", "interval", updater.DefaultCheckInterval)
+	} else {
+		slog.Info("auto-update disabled")
+	}
 
 	defer a.shutdown()
 
@@ -454,6 +472,10 @@ func (a *Agent) setupSignalHandlers() {
 func (a *Agent) shutdown() {
 	a.State = StateStopped
 	a.netMonitor.Stop()
+	if a.autoUpdater != nil {
+		a.autoUpdater.Stop()
+		a.autoUpdater = nil
+	}
 	if a.taskExec != nil {
 		a.taskExec.Shutdown()
 		a.taskExec = nil
@@ -470,6 +492,51 @@ func (a *Agent) shutdown() {
 }
 
 // --- 工具函数 ---
+
+// checkUpgradeResult 检查上次升级操作的结果并上报。
+func (a *Agent) checkUpgradeResult(upd *updater.Updater) {
+	state, err := config.ReadUpgradeState(upd.ConfigDir())
+	if err != nil {
+		slog.Warn("failed to read upgrade state", "error", err)
+		return
+	}
+	if state == nil {
+		return
+	}
+
+	defer config.RemoveUpgradeState(upd.ConfigDir())
+
+	const expireSeconds = 600 // 10 分钟
+	elapsed := time.Now().Unix() - state.StartedAt
+
+	var status string
+	var exitCode int
+	var output string
+
+	switch {
+	case elapsed > expireSeconds:
+		status = "failed"
+		exitCode = -1
+		output = fmt.Sprintf("Upgrade state expired (started %ds ago)", elapsed)
+	case Version == state.TargetVersion:
+		status = "success"
+		exitCode = 0
+		output = fmt.Sprintf("Upgraded from %s to %s", state.PreviousVersion, state.TargetVersion)
+	default:
+		status = "failed"
+		exitCode = -1
+		output = fmt.Sprintf("Version mismatch: expected %s, got %s", state.TargetVersion, Version)
+	}
+
+	slog.Info("upgrade result", "status", status, "detail", output)
+
+	// 仅当有 ExecutionID 时上报给后端（面板任务触发的升级）
+	if state.ExecutionID != "" && a.apiClient != nil {
+		if err := a.apiClient.ReportTask(state.ExecutionID, status, &exitCode, &output); err != nil {
+			slog.Warn("failed to report upgrade result", "error", err)
+		}
+	}
+}
 
 func defaultHostname() string {
 	h, err := os.Hostname()

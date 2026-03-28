@@ -13,30 +13,34 @@ import (
 	"time"
 
 	"github.com/collei-monitor/collei-agent/internal/api"
+	"github.com/collei-monitor/collei-agent/internal/config"
+	"github.com/collei-monitor/collei-agent/internal/updater"
 )
 
 const (
-	MaxOutputLength              = 1 * 1024 * 1024 // 1MB
-	IntermediateReportThreshold  = 4096
-	DefaultMaxWorkers            = 4
-	DefaultTimeoutSec            = 300
+	MaxOutputLength             = 1 * 1024 * 1024 // 1MB
+	IntermediateReportThreshold = 4096
+	DefaultMaxWorkers           = 4
+	DefaultTimeoutSec           = 300
 )
 
 // Executor 处理来自后端的远程任务执行。
 type Executor struct {
 	apiClient *api.Client
+	updater   *updater.Updater
 
 	mu          sync.Mutex
 	activeTasks map[string]struct{}
 
-	sem    chan struct{} // 工作池信号量
-	wg     sync.WaitGroup
+	sem chan struct{} // 工作池信号量
+	wg  sync.WaitGroup
 }
 
 // NewExecutor 创建一个新的任务执行器。
-func NewExecutor(apiClient *api.Client) *Executor {
+func NewExecutor(apiClient *api.Client, upd *updater.Updater) *Executor {
 	return &Executor{
 		apiClient:   apiClient,
+		updater:     upd,
 		activeTasks: make(map[string]struct{}),
 		sem:         make(chan struct{}, DefaultMaxWorkers),
 	}
@@ -178,9 +182,50 @@ func (e *Executor) execScript(execID string, payload map[string]interface{}, tim
 
 func (e *Executor) execUpgrade(execID string, payload map[string]interface{}) {
 	version, _ := payload["version"].(string)
-	url, _ := payload["url"].(string)
-	e.reportStatus(execID, "failed", intPtr(-1),
-		strPtr(fmt.Sprintf("Agent upgrade not yet implemented (version=%s, url=%s)", version, url)))
+	downloadURL, _ := payload["url"].(string)
+	checksum, _ := payload["checksum"].(string)
+
+	if version == "" || downloadURL == "" {
+		e.reportStatus(execID, "failed", intPtr(-1),
+			strPtr("Missing required fields: version and url"))
+		return
+	}
+
+	currentVersion := e.updater.CurrentVersion()
+
+	// 已是目标版本
+	if !updater.NeedsUpdate(currentVersion, version) {
+		output := fmt.Sprintf("Already at version %s", currentVersion)
+		e.reportStatus(execID, "success", intPtr(0), &output)
+		return
+	}
+
+	// 写入升级状态文件（重启后用于上报结果）
+	state := &config.UpgradeState{
+		ExecutionID:     execID,
+		TargetVersion:   version,
+		PreviousVersion: currentVersion,
+		StartedAt:       time.Now().Unix(),
+	}
+	if err := config.WriteUpgradeState(e.updater.ConfigDir(), state); err != nil {
+		e.reportStatus(execID, "failed", intPtr(-1),
+			strPtr(fmt.Sprintf("Failed to write upgrade state: %v", err)))
+		return
+	}
+
+	// 执行下载和替换
+	if err := e.updater.Upgrade(downloadURL, checksum); err != nil {
+		config.RemoveUpgradeState(e.updater.ConfigDir())
+		e.reportStatus(execID, "failed", intPtr(-1),
+			strPtr(fmt.Sprintf("Upgrade failed: %v", err)))
+		return
+	}
+
+	output := fmt.Sprintf("Binary replaced, restarting (%s -> %s)", currentVersion, version)
+	e.reportStatus(execID, "running", nil, &output)
+
+	// 触发重启（重启后新版本会读取状态文件并上报最终结果）
+	updater.TriggerRestart()
 }
 
 // runAndStream 执行命令，流式输出并中间上报，处理超时。
