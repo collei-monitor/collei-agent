@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"runtime"
 	"time"
 
@@ -218,7 +220,20 @@ func setupLogging(verbose, debug bool) {
 	if debug {
 		level = slog.LevelDebug
 	}
-	handler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level})
+
+	var w io.Writer = os.Stderr
+
+	// Windows 服务模式下 stderr 无输出目标，改写入日志文件
+	if service.IsWindowsService() {
+		logDir := config.ServiceConfigDir()
+		_ = os.MkdirAll(logDir, 0o755)
+		logPath := filepath.Join(logDir, "agent.log")
+		if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+			w = f
+		}
+	}
+
+	handler := slog.NewTextHandler(w, &slog.HandlerOptions{Level: level})
 	slog.SetDefault(slog.New(handler))
 }
 

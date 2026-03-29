@@ -456,7 +456,7 @@ function Register-AgentService {
 
     Write-Info "Windows 服务已创建并启动"
     Write-Info "查看状态: Get-Service $SERVICE_NAME"
-    Write-Info "查看日志: Get-WinEvent -LogName Application -MaxEvents 50 | Where-Object { `$_.Message -match 'collei' }"
+    Write-Info "查看日志: Get-Content `"$env:ProgramData\collei-agent\agent.log`" -Tail 50 -Wait"
 }
 
 function Show-StartCommand {
