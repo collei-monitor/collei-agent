@@ -197,18 +197,31 @@ function Invoke-TryProxyDownload {
 function Add-ToUserPath {
     param([string]$Dir)
     $currentPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-    if ($currentPath -split ";" | Where-Object { $_ -eq $Dir }) {
-        return
-    }
+    if (($currentPath -split ";" | Where-Object { $_ -eq $Dir }).Count -gt 0) { return }
     Write-Step "添加 $Dir 到用户 PATH..."
     [Environment]::SetEnvironmentVariable("PATH", "$currentPath;$Dir", "User")
     $env:PATH = "$env:PATH;$Dir"
     Write-Info "已添加到 PATH（重新打开终端后生效）"
 }
 
+function Add-ToSystemPath {
+    param([string]$Dir)
+    $currentPath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    if (($currentPath -split ";" | Where-Object { $_ -eq $Dir }).Count -gt 0) { return }
+    Write-Step "添加 $Dir 到系统 PATH..."
+    [Environment]::SetEnvironmentVariable("PATH", "$currentPath;$Dir", "Machine")
+    $env:PATH = "$env:PATH;$Dir"
+    Write-Info "已添加到系统 PATH（重新打开终端后生效）"
+}
+
 function Test-InPath {
     param([string]$Dir)
-    return ($env:PATH -split ";" | Where-Object { $_ -eq $Dir }).Count -gt 0
+    if (($env:PATH -split ";" | Where-Object { $_ -eq $Dir }).Count -gt 0) { return $true }
+    $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+    if ($machinePath -and ($machinePath -split ";" | Where-Object { $_ -eq $Dir }).Count -gt 0) { return $true }
+    $userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+    if ($userPath -and ($userPath -split ";" | Where-Object { $_ -eq $Dir }).Count -gt 0) { return $true }
+    return $false
 }
 
 function Stop-AgentService {
@@ -347,7 +360,7 @@ function Install-AgentBinary {
     # 检查 PATH
     if (-not (Test-InPath $script:InstallDir)) {
         if (Test-IsAdmin) {
-            Write-Warn "$($script:InstallDir) 不在 PATH 中（服务模式不受影响）"
+            Add-ToSystemPath $script:InstallDir
         } else {
             Add-ToUserPath $script:InstallDir
         }
@@ -456,7 +469,7 @@ function Register-AgentService {
 
     Write-Info "Windows 服务已创建并启动"
     Write-Info "查看状态: Get-Service $SERVICE_NAME"
-    Write-Info "查看日志: Get-Content `"$env:ProgramData\collei-agent\agent.log`" -Tail 50 -Wait"
+    Write-Info "查看日志: Get-Content `"$env:ProgramData\collei-agent\agent.log`" -Encoding UTF8 -Tail 50 -Wait"
 }
 
 function Show-StartCommand {
