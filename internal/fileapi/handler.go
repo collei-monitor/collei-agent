@@ -41,6 +41,11 @@ func safePath(raw string) (string, error) {
 		raw = raw[1:] // 去掉开头的 "/"
 	}
 
+	// Windows: 纯盘符 "C:" 表示当前工作目录，需要加 "\" 才是根目录
+	if runtime.GOOS == "windows" && len(raw) == 2 && raw[1] == ':' {
+		raw = raw + "\\"
+	}
+
 	cleaned := filepath.Clean(raw)
 	abs, err := filepath.Abs(cleaned)
 	if err != nil {
@@ -96,6 +101,11 @@ func handleReaddir(ws *websocket.Conn, data map[string]interface{}) {
 
 	result := make([]fileEntry, 0, len(entries))
 	for _, e := range entries {
+		// Windows: 跳过隐藏/系统文件
+		if runtime.GOOS == "windows" && isWindowsHiddenOrSystem(filepath.Join(resolved, e.Name())) {
+			continue
+		}
+
 		info, err := e.Info()
 		if err != nil {
 			continue
