@@ -246,6 +246,7 @@ configure_sshd_ca_match() {
 ${SSHD_MATCH_START}
 Match Address 127.0.0.1,::1
     TrustedUserCAKeys ${CA_FILE}
+    PermitRootLogin prohibit-password
 ${SSHD_MATCH_END}
 EOF
 
@@ -489,6 +490,87 @@ download_and_install() {
 
     # 检查 PATH
     check_in_path "$INSTALL_DIR"
+}
+
+# ======================== 时钟同步 ========================
+
+ensure_time_sync() {
+    step "检查系统时钟同步..."
+
+    # 检查是否已同步
+    if command -v timedatectl &>/dev/null; then
+        local synced
+        synced=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "")
+        if [[ "$synced" == "yes" ]]; then
+            info "系统时钟已同步"
+            return 0
+        fi
+    fi
+
+    # 尝试启用 systemd-timesyncd
+    if command -v timedatectl &>/dev/null; then
+        if timedatectl set-ntp true 2>/dev/null; then
+            # 安装 systemd-timesyncd（部分最小化系统未预装）
+            if ! systemctl is-active systemd-timesyncd &>/dev/null; then
+                if command -v apt-get &>/dev/null; then
+                    apt-get install -y systemd-timesyncd &>/dev/null || true
+                elif command -v yum &>/dev/null; then
+                    yum install -y systemd-timesyncd &>/dev/null || true
+                fi
+                systemctl enable --now systemd-timesyncd 2>/dev/null || true
+            fi
+
+            # 等待同步（最多 10 秒）
+            local i
+            for i in $(seq 1 10); do
+                local synced
+                synced=$(timedatectl show --property=NTPSynchronized --value 2>/dev/null || echo "")
+                if [[ "$synced" == "yes" ]]; then
+                    info "时钟已通过 systemd-timesyncd 同步"
+                    return 0
+                fi
+                sleep 1
+            done
+            # 未在 10 秒内同步，继续尝试其他方式
+        fi
+    fi
+
+    # 回退方案：chrony
+    if command -v chronyd &>/dev/null || command -v chronyc &>/dev/null; then
+        systemctl enable --now chronyd 2>/dev/null || true
+        chronyc makestep 2>/dev/null || true
+        info "时钟已通过 chrony 同步"
+        return 0
+    fi
+
+    # 回退方案：ntpdate 一次性同步
+    if command -v ntpdate &>/dev/null; then
+        ntpdate -u pool.ntp.org 2>/dev/null && {
+            info "时钟已通过 ntpdate 同步"
+            return 0
+        }
+    fi
+
+    # 最后尝试安装 systemd-timesyncd
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y systemd-timesyncd &>/dev/null && \
+            systemctl enable --now systemd-timesyncd 2>/dev/null && \
+            timedatectl set-ntp true 2>/dev/null && {
+            info "已安装并启用 systemd-timesyncd"
+            return 0
+        }
+    elif command -v yum &>/dev/null; then
+        yum install -y chrony &>/dev/null && \
+            systemctl enable --now chronyd 2>/dev/null && \
+            chronyc makestep 2>/dev/null && {
+            info "已安装并启用 chrony"
+            return 0
+        }
+    fi
+
+    warn "无法自动同步系统时钟，SSH 证书认证可能因时钟偏差失败"
+    warn "建议手动执行: timedatectl set-ntp true"
+    return 0
 }
 
 # ======================== CA 信任配置 ========================
@@ -994,7 +1076,12 @@ do_install() {
     # 2. 下载并安装二进制
     download_and_install
 
-    # 3. CA 信任配置（可选）
+    # 3. 同步系统时钟（证书认证依赖准确时钟）
+    if is_root && [[ "$SETUP_CA" == true ]]; then
+        ensure_time_sync
+    fi
+
+    # 4. CA 信任配置（可选）
     local ca_ok=false
     if [[ "$SETUP_CA" == true ]]; then
         if setup_ca_trust; then
@@ -1005,10 +1092,10 @@ do_install() {
         fi
     fi
 
-    # 4. 生成配置文件
+    # 5. 生成配置文件
     generate_config
 
-    # 5. 创建 systemd 服务并启动
+    # 6. 创建 systemd 服务并启动
     create_systemd_service
 
     echo ""
