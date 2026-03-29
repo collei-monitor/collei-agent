@@ -536,8 +536,8 @@ function Invoke-Update {
     # 获取当前版本
     $currentVersion = ""
     try {
-        $versionOutput = & $binaryPath version 2>$null
-        if ($versionOutput -match '(\S+)$') {
+        $versionOutput = (& $binaryPath version 2>$null) | Select-Object -First 1
+        if ($versionOutput -match 'Collei Agent (\S+)') {
             $currentVersion = $Matches[1]
         }
         Write-Info "当前版本: $currentVersion"
@@ -679,8 +679,8 @@ function Invoke-Update {
     # 显示新版本
     $newVersion = ""
     try {
-        $versionOutput = & $binaryPath version 2>$null
-        if ($versionOutput -match '(\S+)$') { $newVersion = $Matches[1] }
+        $versionOutput = (& $binaryPath version 2>$null) | Select-Object -First 1
+        if ($versionOutput -match 'Collei Agent (\S+)') { $newVersion = $Matches[1] }
     } catch { }
 
     Write-Host ""
