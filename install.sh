@@ -745,6 +745,9 @@ do_update_ca() {
 
     info "使用配置文件: ${config_file}"
 
+    # 同步系统时钟（证书认证依赖准确时钟）
+    ensure_time_sync
+
     # 从 agent.yaml 读取 server_url
     local url
     url=$(grep 'server_url:' "$config_file" | awk '{print $2}')
