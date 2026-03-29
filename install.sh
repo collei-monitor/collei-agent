@@ -246,7 +246,6 @@ configure_sshd_ca_match() {
 ${SSHD_MATCH_START}
 Match Address 127.0.0.1,::1
     TrustedUserCAKeys ${CA_FILE}
-    PermitRootLogin prohibit-password
 ${SSHD_MATCH_END}
 EOF
 
