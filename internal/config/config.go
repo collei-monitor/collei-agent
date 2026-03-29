@@ -3,10 +3,12 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 
+	"golang.org/x/net/idna"
 	"gopkg.in/yaml.v3"
 )
 
@@ -129,6 +131,39 @@ func ServiceConfigDir() string {
 // IsRegistered 返回 Agent 是否已注册（有 URL 和 Token）。
 func (c *AgentConfig) IsRegistered() bool {
 	return c.ServerURL != "" && c.Token != ""
+}
+
+// NormalizeIDNURL 将 URL 中的国际化域名转换为 Punycode，
+// 以支持中文域名等 IDN 地址。
+func NormalizeIDNURL(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+
+	host := u.Hostname()
+	port := u.Port()
+
+	ascii, err := idna.Lookup.ToASCII(host)
+	if err != nil {
+		// 已经是纯 ASCII 或无法转换，原样返回
+		return rawURL
+	}
+	if ascii == host {
+		return rawURL
+	}
+
+	slog.Info("IDN domain normalized", "original", host, "punycode", ascii)
+
+	if port != "" {
+		u.Host = ascii + ":" + port
+	} else {
+		u.Host = ascii
+	}
+	return u.String()
 }
 
 // ValidateForRegister 检查自动注册所需的参数是否齐全。

@@ -103,6 +103,10 @@ func (a *Agent) Run() {
 	a.setupSignalHandlers()
 
 	slog.Info("Collei Agent started", "version", Version)
+
+	// 将国际化域名（如中文域名）转换为 Punycode
+	a.Config.ServerURL = config.NormalizeIDNURL(a.Config.ServerURL)
+
 	slog.Info("Backend", "url", a.Config.ServerURL)
 
 	a.apiClient = api.NewClient(a.Config.ServerURL, 0)
