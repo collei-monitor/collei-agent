@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 
 	"github.com/gorilla/websocket"
 
@@ -29,6 +30,12 @@ type fileEntry struct {
 func safePath(raw string) (string, error) {
 	if raw == "" {
 		return "", fmt.Errorf("empty path")
+	}
+
+	// Windows: 前端使用 Unix 风格路径，需要转换盘符路径。
+	// 例如 "/C:" → "C:\" , "/C:/Users" → "C:\Users"
+	if runtime.GOOS == "windows" && len(raw) >= 3 && raw[0] == '/' && raw[2] == ':' {
+		raw = raw[1:] // 去掉开头的 "/"
 	}
 
 	cleaned := filepath.Clean(raw)
@@ -58,6 +65,19 @@ func handleReaddir(ws *websocket.Conn, data map[string]interface{}) {
 	path, _ := data["path"].(string)
 	requestID, _ := data["request_id"].(string)
 	sessionID, _ := data["session_id"].(string)
+
+	// Windows 特殊处理：当请求 "/" 时，列出所有可用驱动器
+	if runtime.GOOS == "windows" && (path == "/" || path == "\\") {
+		result := listWindowsDrives()
+		resp, _ := json.Marshal(map[string]interface{}{
+			"type":       "readdir_resp",
+			"request_id": requestID,
+			"session_id": sessionID,
+			"entries":    result,
+		})
+		ws.WriteMessage(websocket.TextMessage, resp)
+		return
+	}
 
 	resolved, err := safePath(path)
 	if err != nil {
@@ -93,6 +113,26 @@ func handleReaddir(ws *websocket.Conn, data map[string]interface{}) {
 		"entries":    result,
 	})
 	ws.WriteMessage(websocket.TextMessage, resp)
+}
+
+// listWindowsDrives 枚举 Windows 上所有可用驱动器 (A:-Z:)。
+func listWindowsDrives() []fileEntry {
+	var drives []fileEntry
+	for letter := 'A'; letter <= 'Z'; letter++ {
+		root := string(letter) + ":\\"
+		info, err := os.Stat(root)
+		if err != nil {
+			continue
+		}
+		drives = append(drives, fileEntry{
+			Name:  string(letter) + ":",
+			Size:  0,
+			Mode:  uint32(info.Mode()),
+			IsDir: true,
+			Mtime: info.ModTime().Unix(),
+		})
+	}
+	return drives
 }
 
 // handleStat 返回文件/目录信息。

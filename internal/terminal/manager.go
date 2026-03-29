@@ -413,13 +413,19 @@ func (m *Manager) handleOpenTerminal(ws *websocket.Conn, sessions *terminalSessi
 	// Bridge terminal stdout → WS
 	bridgeTerminalToWS(ws, t, sessionID)
 
+	// If closeAll() already removed and closed this session (e.g. disconnect),
+	// skip Wait/Close to avoid operating on an already-freed ConPTY handle,
+	// which causes crashes on Windows.
+	if sessions.remove(sessionID) == nil {
+		return
+	}
+
 	// Wait for process exit
 	exitCode := -1
 	if state, err := t.Wait(); err == nil && state != nil {
 		exitCode = state.ExitCode()
 	}
 
-	sessions.remove(sessionID)
 	t.Close()
 
 	sendTerminalClosed(ws, sessionID, exitCode, "process_exited")
