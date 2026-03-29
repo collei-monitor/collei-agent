@@ -18,11 +18,14 @@ const readChunkSize = 32768 // 32KB
 
 // fileEntry 是 readdir 返回的目录项。
 type fileEntry struct {
-	Name  string `json:"name"`
-	Size  int64  `json:"size"`
-	Mode  uint32 `json:"mode"`
-	IsDir bool   `json:"is_dir"`
-	Mtime int64  `json:"mtime"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Size        int64  `json:"size"`
+	Mode        uint32 `json:"mode"`
+	IsDir       bool   `json:"is_dir"`
+	Mtime       int64  `json:"mtime"`
+	Permissions string `json:"permissions,omitempty"`
+	LinkTarget  string `json:"link_target,omitempty"`
 }
 
 // safePath 验证并解析路径，防止目录遍历攻击。
@@ -97,13 +100,25 @@ func handleReaddir(ws *websocket.Conn, data map[string]interface{}) {
 		if err != nil {
 			continue
 		}
-		result = append(result, fileEntry{
-			Name:  e.Name(),
-			Size:  info.Size(),
-			Mode:  uint32(info.Mode()),
-			IsDir: e.IsDir(),
-			Mtime: info.ModTime().Unix(),
-		})
+		fe := fileEntry{
+			Name:        e.Name(),
+			Size:        info.Size(),
+			Mode:        uint32(info.Mode()),
+			Mtime:       info.ModTime().Unix(),
+			Permissions: info.Mode().String(),
+		}
+		if e.Type()&os.ModeSymlink != 0 {
+			fe.Type = "link"
+			fe.IsDir = false
+			fe.LinkTarget, _ = os.Readlink(filepath.Join(resolved, e.Name()))
+		} else if e.IsDir() {
+			fe.Type = "dir"
+			fe.IsDir = true
+		} else {
+			fe.Type = "file"
+			fe.IsDir = false
+		}
+		result = append(result, fe)
 	}
 
 	resp, _ := json.Marshal(map[string]interface{}{
@@ -126,7 +141,8 @@ func listWindowsDrives() []fileEntry {
 		}
 		drives = append(drives, fileEntry{
 			Name:  string(letter) + ":",
-			Size:  0,
+			Type:  "drive",
+			Size:  getDriveSize(root),
 			Mode:  uint32(info.Mode()),
 			IsDir: true,
 			Mtime: info.ModTime().Unix(),
