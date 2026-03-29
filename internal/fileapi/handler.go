@@ -57,16 +57,17 @@ func safePath(raw string) (string, error) {
 func handleReaddir(ws *websocket.Conn, data map[string]interface{}) {
 	path, _ := data["path"].(string)
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 
 	resolved, err := safePath(path)
 	if err != nil {
-		sendFileError(ws, "readdir_resp", requestID, err.Error())
+		sendFileError(ws, "readdir_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	entries, err := os.ReadDir(resolved)
 	if err != nil {
-		sendFileError(ws, "readdir_resp", requestID, err.Error())
+		sendFileError(ws, "readdir_resp", requestID, sessionID, err.Error())
 		return
 	}
 
@@ -88,6 +89,7 @@ func handleReaddir(ws *websocket.Conn, data map[string]interface{}) {
 	resp, _ := json.Marshal(map[string]interface{}{
 		"type":       "readdir_resp",
 		"request_id": requestID,
+		"session_id": sessionID,
 		"entries":    result,
 	})
 	ws.WriteMessage(websocket.TextMessage, resp)
@@ -97,22 +99,24 @@ func handleReaddir(ws *websocket.Conn, data map[string]interface{}) {
 func handleStat(ws *websocket.Conn, data map[string]interface{}) {
 	path, _ := data["path"].(string)
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 
 	resolved, err := safePath(path)
 	if err != nil {
-		sendFileError(ws, "stat_resp", requestID, err.Error())
+		sendFileError(ws, "stat_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	info, err := os.Stat(resolved)
 	if err != nil {
-		sendFileError(ws, "stat_resp", requestID, err.Error())
+		sendFileError(ws, "stat_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	resp, _ := json.Marshal(map[string]interface{}{
 		"type":       "stat_resp",
 		"request_id": requestID,
+		"session_id": sessionID,
 		"name":       info.Name(),
 		"size":       info.Size(),
 		"mode":       uint32(info.Mode()),
@@ -126,32 +130,33 @@ func handleStat(ws *websocket.Conn, data map[string]interface{}) {
 func handleRead(ws *websocket.Conn, data map[string]interface{}) {
 	path, _ := data["path"].(string)
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 	offset := int64FromJSON(data["offset"], 0)
 	length := int64FromJSON(data["length"], -1) // -1 = entire file
 
 	resolved, err := safePath(path)
 	if err != nil {
-		sendFileError(ws, "read_resp", requestID, err.Error())
+		sendFileError(ws, "read_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	f, err := os.Open(resolved)
 	if err != nil {
-		sendFileError(ws, "read_resp", requestID, err.Error())
+		sendFileError(ws, "read_resp", requestID, sessionID, err.Error())
 		return
 	}
 	defer f.Close()
 
 	if offset > 0 {
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			sendFileError(ws, "read_resp", requestID, err.Error())
+			sendFileError(ws, "read_resp", requestID, sessionID, err.Error())
 			return
 		}
 	}
 
 	info, err := f.Stat()
 	if err != nil {
-		sendFileError(ws, "read_resp", requestID, err.Error())
+		sendFileError(ws, "read_resp", requestID, sessionID, err.Error())
 		return
 	}
 
@@ -164,6 +169,7 @@ func handleRead(ws *websocket.Conn, data map[string]interface{}) {
 	header, _ := json.Marshal(map[string]interface{}{
 		"type":       "read_resp",
 		"request_id": requestID,
+		"session_id": sessionID,
 		"size":       totalSize,
 	})
 	if err := ws.WriteMessage(websocket.TextMessage, header); err != nil {
@@ -200,13 +206,13 @@ func handleRead(ws *websocket.Conn, data map[string]interface{}) {
 // Returns true to indicate the next binary frame should be captured for write.
 func handleWrite(ws *websocket.Conn, data map[string]interface{}, verifier *auth.Verifier) bool {
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 
 	// Signature verification for write operations
 	if verifier != nil {
 		path, _ := data["path"].(string)
 		timestamp, _ := data["timestamp"].(float64)
 		nonce, _ := data["nonce"].(string)
-		sessionID, _ := data["session_id"].(string)
 		signature, _ := data["signature"].(string)
 
 		err := verifier.Verify(&auth.SignedMessage{
@@ -219,7 +225,7 @@ func handleWrite(ws *websocket.Conn, data map[string]interface{}, verifier *auth
 		})
 		if err != nil {
 			slog.Warn("FileAPI: write signature rejected", "error", err)
-			sendFileError(ws, "write_resp", requestID, "signature_rejected: "+err.Error())
+			sendFileError(ws, "write_resp", requestID, sessionID, "signature_rejected: "+err.Error())
 			return false
 		}
 	}
@@ -231,11 +237,12 @@ func handleWrite(ws *websocket.Conn, data map[string]interface{}, verifier *auth
 func executeWrite(ws *websocket.Conn, data map[string]interface{}, payload []byte) {
 	path, _ := data["path"].(string)
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 	offset := int64FromJSON(data["offset"], 0)
 
 	resolved, err := safePath(path)
 	if err != nil {
-		sendFileError(ws, "write_resp", requestID, err.Error())
+		sendFileError(ws, "write_resp", requestID, sessionID, err.Error())
 		return
 	}
 
@@ -246,27 +253,28 @@ func executeWrite(ws *websocket.Conn, data map[string]interface{}, payload []byt
 
 	f, err := os.OpenFile(resolved, flag, 0o644)
 	if err != nil {
-		sendFileError(ws, "write_resp", requestID, err.Error())
+		sendFileError(ws, "write_resp", requestID, sessionID, err.Error())
 		return
 	}
 	defer f.Close()
 
 	if offset > 0 {
 		if _, err := f.Seek(offset, io.SeekStart); err != nil {
-			sendFileError(ws, "write_resp", requestID, err.Error())
+			sendFileError(ws, "write_resp", requestID, sessionID, err.Error())
 			return
 		}
 	}
 
 	n, err := f.Write(payload)
 	if err != nil {
-		sendFileError(ws, "write_resp", requestID, err.Error())
+		sendFileError(ws, "write_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	resp, _ := json.Marshal(map[string]interface{}{
 		"type":          "write_resp",
 		"request_id":    requestID,
+		"session_id":    sessionID,
 		"bytes_written": n,
 	})
 	ws.WriteMessage(websocket.TextMessage, resp)
@@ -276,11 +284,11 @@ func executeWrite(ws *websocket.Conn, data map[string]interface{}, payload []byt
 func handleRemove(ws *websocket.Conn, data map[string]interface{}, verifier *auth.Verifier) {
 	path, _ := data["path"].(string)
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 
 	if verifier != nil {
 		timestamp, _ := data["timestamp"].(float64)
 		nonce, _ := data["nonce"].(string)
-		sessionID, _ := data["session_id"].(string)
 		signature, _ := data["signature"].(string)
 
 		err := verifier.Verify(&auth.SignedMessage{
@@ -293,25 +301,26 @@ func handleRemove(ws *websocket.Conn, data map[string]interface{}, verifier *aut
 		})
 		if err != nil {
 			slog.Warn("FileAPI: remove signature rejected", "error", err)
-			sendFileError(ws, "remove_resp", requestID, "signature_rejected: "+err.Error())
+			sendFileError(ws, "remove_resp", requestID, sessionID, "signature_rejected: "+err.Error())
 			return
 		}
 	}
 
 	resolved, err := safePath(path)
 	if err != nil {
-		sendFileError(ws, "remove_resp", requestID, err.Error())
+		sendFileError(ws, "remove_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	if err := os.Remove(resolved); err != nil {
-		sendFileError(ws, "remove_resp", requestID, err.Error())
+		sendFileError(ws, "remove_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	resp, _ := json.Marshal(map[string]interface{}{
 		"type":       "remove_resp",
 		"request_id": requestID,
+		"session_id": sessionID,
 		"ok":         true,
 	})
 	ws.WriteMessage(websocket.TextMessage, resp)
@@ -322,11 +331,11 @@ func handleRename(ws *websocket.Conn, data map[string]interface{}, verifier *aut
 	oldPath, _ := data["old"].(string)
 	newPath, _ := data["new"].(string)
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 
 	if verifier != nil {
 		timestamp, _ := data["timestamp"].(float64)
 		nonce, _ := data["nonce"].(string)
-		sessionID, _ := data["session_id"].(string)
 		signature, _ := data["signature"].(string)
 
 		err := verifier.Verify(&auth.SignedMessage{
@@ -339,30 +348,31 @@ func handleRename(ws *websocket.Conn, data map[string]interface{}, verifier *aut
 		})
 		if err != nil {
 			slog.Warn("FileAPI: rename signature rejected", "error", err)
-			sendFileError(ws, "rename_resp", requestID, "signature_rejected: "+err.Error())
+			sendFileError(ws, "rename_resp", requestID, sessionID, "signature_rejected: "+err.Error())
 			return
 		}
 	}
 
 	resolvedOld, err := safePath(oldPath)
 	if err != nil {
-		sendFileError(ws, "rename_resp", requestID, err.Error())
+		sendFileError(ws, "rename_resp", requestID, sessionID, err.Error())
 		return
 	}
 	resolvedNew, err := safePath(newPath)
 	if err != nil {
-		sendFileError(ws, "rename_resp", requestID, err.Error())
+		sendFileError(ws, "rename_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	if err := os.Rename(resolvedOld, resolvedNew); err != nil {
-		sendFileError(ws, "rename_resp", requestID, err.Error())
+		sendFileError(ws, "rename_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	resp, _ := json.Marshal(map[string]interface{}{
 		"type":       "rename_resp",
 		"request_id": requestID,
+		"session_id": sessionID,
 		"ok":         true,
 	})
 	ws.WriteMessage(websocket.TextMessage, resp)
@@ -372,11 +382,11 @@ func handleRename(ws *websocket.Conn, data map[string]interface{}, verifier *aut
 func handleMkdir(ws *websocket.Conn, data map[string]interface{}, verifier *auth.Verifier) {
 	path, _ := data["path"].(string)
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 
 	if verifier != nil {
 		timestamp, _ := data["timestamp"].(float64)
 		nonce, _ := data["nonce"].(string)
-		sessionID, _ := data["session_id"].(string)
 		signature, _ := data["signature"].(string)
 
 		err := verifier.Verify(&auth.SignedMessage{
@@ -389,25 +399,26 @@ func handleMkdir(ws *websocket.Conn, data map[string]interface{}, verifier *auth
 		})
 		if err != nil {
 			slog.Warn("FileAPI: mkdir signature rejected", "error", err)
-			sendFileError(ws, "mkdir_resp", requestID, "signature_rejected: "+err.Error())
+			sendFileError(ws, "mkdir_resp", requestID, sessionID, "signature_rejected: "+err.Error())
 			return
 		}
 	}
 
 	resolved, err := safePath(path)
 	if err != nil {
-		sendFileError(ws, "mkdir_resp", requestID, err.Error())
+		sendFileError(ws, "mkdir_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	if err := os.MkdirAll(resolved, 0o755); err != nil {
-		sendFileError(ws, "mkdir_resp", requestID, err.Error())
+		sendFileError(ws, "mkdir_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	resp, _ := json.Marshal(map[string]interface{}{
 		"type":       "mkdir_resp",
 		"request_id": requestID,
+		"session_id": sessionID,
 		"ok":         true,
 	})
 	ws.WriteMessage(websocket.TextMessage, resp)
@@ -417,11 +428,11 @@ func handleMkdir(ws *websocket.Conn, data map[string]interface{}, verifier *auth
 func handleRmdir(ws *websocket.Conn, data map[string]interface{}, verifier *auth.Verifier) {
 	path, _ := data["path"].(string)
 	requestID, _ := data["request_id"].(string)
+	sessionID, _ := data["session_id"].(string)
 
 	if verifier != nil {
 		timestamp, _ := data["timestamp"].(float64)
 		nonce, _ := data["nonce"].(string)
-		sessionID, _ := data["session_id"].(string)
 		signature, _ := data["signature"].(string)
 
 		err := verifier.Verify(&auth.SignedMessage{
@@ -434,35 +445,37 @@ func handleRmdir(ws *websocket.Conn, data map[string]interface{}, verifier *auth
 		})
 		if err != nil {
 			slog.Warn("FileAPI: rmdir signature rejected", "error", err)
-			sendFileError(ws, "rmdir_resp", requestID, "signature_rejected: "+err.Error())
+			sendFileError(ws, "rmdir_resp", requestID, sessionID, "signature_rejected: "+err.Error())
 			return
 		}
 	}
 
 	resolved, err := safePath(path)
 	if err != nil {
-		sendFileError(ws, "rmdir_resp", requestID, err.Error())
+		sendFileError(ws, "rmdir_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	if err := os.RemoveAll(resolved); err != nil {
-		sendFileError(ws, "rmdir_resp", requestID, err.Error())
+		sendFileError(ws, "rmdir_resp", requestID, sessionID, err.Error())
 		return
 	}
 
 	resp, _ := json.Marshal(map[string]interface{}{
 		"type":       "rmdir_resp",
 		"request_id": requestID,
+		"session_id": sessionID,
 		"ok":         true,
 	})
 	ws.WriteMessage(websocket.TextMessage, resp)
 }
 
 // sendFileError sends a JSON error response for file operations.
-func sendFileError(ws *websocket.Conn, respType, requestID, errMsg string) {
+func sendFileError(ws *websocket.Conn, respType, requestID, sessionID, errMsg string) {
 	resp, _ := json.Marshal(map[string]interface{}{
 		"type":       respType,
 		"request_id": requestID,
+		"session_id": sessionID,
 		"error":      errMsg,
 	})
 	ws.WriteMessage(websocket.TextMessage, resp)
