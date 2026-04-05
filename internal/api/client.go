@@ -77,6 +77,14 @@ type PendingTask struct {
 	Payload     string `json:"payload"`
 }
 
+// AgentFeatures 描述 Agent 当前启用的功能状态，随 report 上报。
+type AgentFeatures struct {
+	SSHEnabled      bool `json:"ssh_enabled"`
+	TerminalEnabled bool `json:"terminal_enabled"`
+	FileAPIEnabled  bool `json:"file_api_enabled"`
+	TasksEnabled    bool `json:"tasks_enabled"`
+}
+
 type ReportResponse struct {
 	UUID            string              `json:"uuid"`
 	IsApproved      int                 `json:"is_approved"`
@@ -166,6 +174,7 @@ type ReportParams struct {
 	NetIO          []collector.NetInterface
 	NetworkVersion string
 	NetworkData    []network.ProbeResult
+	Features       *AgentFeatures
 }
 
 type reportPayload struct {
@@ -178,6 +187,7 @@ type reportPayload struct {
 	CurrentNetIO   []collector.NetInterface  `json:"current_net_io,omitempty"`
 	NetworkVersion string                    `json:"network_version,omitempty"`
 	NetworkData    []network.ProbeResult     `json:"network_data,omitempty"`
+	Features       *AgentFeatures            `json:"features,omitempty"`
 }
 
 // Report 向服务端发送监控数据。
@@ -192,6 +202,7 @@ func (c *Client) Report(params *ReportParams) (*ReportResponse, error) {
 		CurrentNetIO:   params.NetIO,
 		NetworkVersion: params.NetworkVersion,
 		NetworkData:    params.NetworkData,
+		Features:       params.Features,
 	}
 
 	var resp ReportResponse

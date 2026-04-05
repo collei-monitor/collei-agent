@@ -28,6 +28,7 @@ const (
 type Executor struct {
 	apiClient *api.Client
 	updater   *updater.Updater
+	enabled   bool
 
 	mu          sync.Mutex
 	activeTasks map[string]struct{}
@@ -37,18 +38,43 @@ type Executor struct {
 }
 
 // NewExecutor 创建一个新的任务执行器。
-func NewExecutor(apiClient *api.Client, upd *updater.Updater) *Executor {
+func NewExecutor(apiClient *api.Client, upd *updater.Updater, enabled bool) *Executor {
 	return &Executor{
 		apiClient:   apiClient,
 		updater:     upd,
+		enabled:     enabled,
 		activeTasks: make(map[string]struct{}),
 		sem:         make(chan struct{}, DefaultMaxWorkers),
 	}
 }
 
+// SetEnabled 动态更新任务执行器的启用状态。
+func (e *Executor) SetEnabled(v bool) {
+	e.mu.Lock()
+	e.enabled = v
+	e.mu.Unlock()
+}
+
 // HandlePendingTasks 处理上报响应中的 pending_tasks 列表。
 func (e *Executor) HandlePendingTasks(tasks []api.PendingTask) {
 	if len(tasks) == 0 {
+		return
+	}
+
+	// 检查功能是否启用，未启用时拒绝所有任务并上报失败
+	e.mu.Lock()
+	isEnabled := e.enabled
+	e.mu.Unlock()
+
+	if !isEnabled {
+		slog.Warn("task: remote execution disabled, rejecting tasks", "count", len(tasks))
+		for _, t := range tasks {
+			if t.ExecutionID == "" {
+				continue
+			}
+			e.reportStatus(t.ExecutionID, "failed", intPtr(-1),
+				strPtr("Remote task execution is disabled on this agent (SSH not enabled)"))
+		}
 		return
 	}
 

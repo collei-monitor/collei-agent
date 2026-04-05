@@ -30,6 +30,12 @@ type FileAPIConfig struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// TasksConfig 存储远程任务执行配置。
+type TasksConfig struct {
+	Enabled  bool `yaml:"enabled"`
+	Explicit bool `yaml:"explicit,omitempty"` // 是否由用户显式配置（非默认跟随 SSH）
+}
+
 // persistedConfig 是写入 agent.yaml 的字段子集。
 type persistedConfig struct {
 	ServerURL        string          `yaml:"server_url,omitempty"`
@@ -39,6 +45,7 @@ type persistedConfig struct {
 	SSH              *SSHConfig      `yaml:"ssh,omitempty"`
 	Terminal         *TerminalConfig `yaml:"terminal,omitempty"`
 	FileAPI          *FileAPIConfig  `yaml:"file_api,omitempty"`
+	Tasks            *TasksConfig    `yaml:"tasks,omitempty"`
 	CAPublicKeyPath  string          `yaml:"ca_public_key_path,omitempty"`
 	AutoUpdate       *bool           `yaml:"auto_update,omitempty"`
 }
@@ -53,6 +60,7 @@ type AgentConfig struct {
 	SSH              SSHConfig
 	Terminal         TerminalConfig
 	FileAPI          FileAPIConfig
+	Tasks            TasksConfig
 	CAPublicKeyPath  string
 	AutoUpdate       bool
 
@@ -131,6 +139,16 @@ func ServiceConfigDir() string {
 // IsRegistered 返回 Agent 是否已注册（有 URL 和 Token）。
 func (c *AgentConfig) IsRegistered() bool {
 	return c.ServerURL != "" && c.Token != ""
+}
+
+// TasksEnabled 返回远程任务执行是否启用。
+// 如果用户显式配置了 tasks.enabled，则使用该值；
+// 否则默认跟随 SSH.Enabled。
+func (c *AgentConfig) TasksEnabled() bool {
+	if c.Tasks.Explicit {
+		return c.Tasks.Enabled
+	}
+	return c.SSH.Enabled
 }
 
 // NormalizeIDNURL 将 URL 中的国际化域名转换为 Punycode，
@@ -217,6 +235,9 @@ func (c *AgentConfig) Save(path string) error {
 	if c.FileAPI.Enabled {
 		p.FileAPI = &c.FileAPI
 	}
+	if c.Tasks.Explicit {
+		p.Tasks = &c.Tasks
+	}
 	if c.CAPublicKeyPath != "" {
 		p.CAPublicKeyPath = c.CAPublicKeyPath
 	}
@@ -281,6 +302,9 @@ func Load(path string) *AgentConfig {
 	}
 	if p.FileAPI != nil {
 		cfg.FileAPI = *p.FileAPI
+	}
+	if p.Tasks != nil {
+		cfg.Tasks = *p.Tasks
 	}
 	if p.CAPublicKeyPath != "" {
 		cfg.CAPublicKeyPath = p.CAPublicKeyPath

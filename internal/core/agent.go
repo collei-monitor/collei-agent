@@ -112,7 +112,11 @@ func (a *Agent) Run() {
 	a.apiClient = api.NewClient(a.Config.ServerURL, 0)
 
 	upd := updater.NewUpdater(a.stateDir, a.Config.ServerURL, a.Config.Token, Version)
-	a.taskExec = task.NewExecutor(a.apiClient, upd)
+	a.taskExec = task.NewExecutor(a.apiClient, upd, a.Config.TasksEnabled())
+
+	if !a.Config.TasksEnabled() {
+		slog.Info("remote task execution disabled (SSH not enabled)")
+	}
 
 	// 检查上次升级结果
 	a.checkUpgradeResult(upd)
@@ -383,6 +387,12 @@ func (a *Agent) reportLoop() {
 				NetIO:          a.collector.CollectNetIO(),
 				NetworkVersion: a.netMonitor.Version(),
 				NetworkData:    networkResults,
+				Features: &api.AgentFeatures{
+					SSHEnabled:      a.Config.SSH.Enabled,
+					TerminalEnabled: a.Config.Terminal.Enabled,
+					FileAPIEnabled:  a.Config.FileAPI.Enabled,
+					TasksEnabled:    a.Config.TasksEnabled(),
+				},
 			})
 			if err != nil {
 				a.handleReportError(err, networkResults)
