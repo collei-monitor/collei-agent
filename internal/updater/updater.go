@@ -76,6 +76,9 @@ func NeedsUpdate(currentVersion, targetVersion string) bool {
 func (u *Updater) CheckGitHubLatest() (*ReleaseInfo, error) {
 	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", GitHubRepo)
 	assetName := fmt.Sprintf("collei-agent-%s-%s", runtime.GOOS, runtime.GOARCH)
+	if runtime.GOOS == "windows" {
+		assetName += ".exe"
+	}
 
 	client := &http.Client{Timeout: GitHubAPITimeout}
 	req, err := http.NewRequest("GET", apiURL, nil)
