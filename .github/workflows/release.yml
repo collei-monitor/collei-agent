@@ -57,6 +57,34 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          CURRENT_TAG=${GITHUB_REF_NAME}
+          PREVIOUS_TAG=$(git tag --sort=-v:refname | grep -v "^${CURRENT_TAG}$" | head -n 1)
+          echo "Previous tag: ${PREVIOUS_TAG}"
+          
+          if [ -z "${PREVIOUS_TAG}" ]; then
+            LOG=$(git log --pretty=format:"* %s (%h)" HEAD)
+          else
+            LOG=$(git log --pretty=format:"* %s (%h)" ${PREVIOUS_TAG}..${CURRENT_TAG})
+          fi
+          
+          # Write to file to handle multiline
+          {
+            echo "## What's Changed"
+            echo ""
+            echo "${LOG}"
+            echo ""
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}"
+          } > CHANGELOG.md
+          
+          cat CHANGELOG.md
+
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -66,4 +94,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          generate_release_notes: true
+          body_path: CHANGELOG.md
