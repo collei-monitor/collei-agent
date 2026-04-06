@@ -57,6 +57,11 @@ func (a *AutoUpdater) loop() {
 }
 
 func (a *AutoUpdater) check() {
+	if config.IsContainer() {
+		slog.Info("auto-updater: running in container, skipping update check")
+		return
+	}
+
 	slog.Debug("auto-updater: checking for new version")
 
 	release, err := a.updater.CheckGitHubLatest()

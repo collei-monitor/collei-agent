@@ -1,0 +1,27 @@
+services:
+  collei-agent:
+    build: .
+    container_name: collei-agent
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    read_only: true
+    cap_add:
+      - NET_RAW
+    tmpfs:
+      - /tmp
+    volumes:
+      - collei-config:/etc/collei-agent
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /etc/os-release:/host/etc/os-release:ro
+    environment:
+      - HOST_PROC=/host/proc
+      - HOST_SYS=/host/sys
+      - HOST_ETC=/host/etc
+      - COLLEI_URL=${COLLEI_URL}
+      - COLLEI_REG_TOKEN=${COLLEI_REG_TOKEN:-}
+      - COLLEI_TOKEN=${COLLEI_TOKEN:-}
+
+volumes:
+  collei-config:

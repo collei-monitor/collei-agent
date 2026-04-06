@@ -204,6 +204,13 @@ func (e *Executor) execScript(execID string, payload map[string]interface{}, tim
 }
 
 func (e *Executor) execUpgrade(execID string, payload map[string]interface{}) {
+	// 容器环境下无法原地替换二进制，跳过升级
+	if config.IsContainer() {
+		e.reportStatus(execID, "failed", intPtr(-1),
+			strPtr("Running in container: upgrade is not supported. Update the container image instead."))
+		return
+	}
+
 	currentVersion := e.updater.CurrentVersion()
 
 	// 查询 GitHub 最新版本

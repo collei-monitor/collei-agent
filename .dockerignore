@@ -1,0 +1,15 @@
+.git
+.gitignore
+.github
+*.md
+markdown/
+Makefile
+install.sh
+install.ps1
+Dockerfile
+docker-compose.yml
+.dockerignore
+.env
+.env.example
+collei-agent
+collei-agent-*

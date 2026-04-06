@@ -31,6 +31,10 @@ build-windows-arm64:
 
 build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-arm64 build-windows-amd64 build-windows-arm64
 
+# Docker
+docker-build:
+	docker build --build-arg VERSION=$(VERSION) -t collei-agent:$(VERSION) -t collei-agent:latest .
+
 test:
 	go test ./...
 
