@@ -22,6 +22,7 @@ services:
       - COLLEI_URL=${COLLEI_URL}
       - COLLEI_REG_TOKEN=${COLLEI_REG_TOKEN:-}
       - COLLEI_TOKEN=${COLLEI_TOKEN:-}
+      - COLLEI_NAME=${COLLEI_NAME:-}
 
 volumes:
   collei-config:

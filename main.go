@@ -62,6 +62,21 @@ func main() {
 			if name != "" {
 				cfg.Name = name
 			}
+
+			// 环境变量兜底（Docker 部署时 compose 可能将未设置的变量传为空串，
+			// 导致 cobra default 已为空，此处显式再读一次）
+			if cfg.ServerURL == "" {
+				cfg.ServerURL = os.Getenv("COLLEI_URL")
+			}
+			if cfg.Token == "" {
+				cfg.Token = os.Getenv("COLLEI_TOKEN")
+			}
+			if cfg.RegToken == "" {
+				cfg.RegToken = os.Getenv("COLLEI_REG_TOKEN")
+			}
+			if cfg.Name == "" {
+				cfg.Name = os.Getenv("COLLEI_NAME")
+			}
 			if interval > 0 {
 				cfg.ReportInterval = interval
 			}
@@ -105,7 +120,7 @@ func main() {
 	runCmd.Flags().StringVar(&url, "url", os.Getenv("COLLEI_URL"), "Backend API URL")
 	runCmd.Flags().StringVar(&token, "token", os.Getenv("COLLEI_TOKEN"), "Server-specific token (passive registration)")
 	runCmd.Flags().StringVar(&regToken, "reg-token", os.Getenv("COLLEI_REG_TOKEN"), "Global registration token (auto registration)")
-	runCmd.Flags().StringVar(&name, "name", "", "Server display name")
+	runCmd.Flags().StringVar(&name, "name", os.Getenv("COLLEI_NAME"), "Server display name")
 	runCmd.Flags().StringVar(&configPath, "config", "", "Config file path")
 	runCmd.Flags().Float64Var(&interval, "interval", 3.0, "Report interval in seconds")
 	runCmd.Flags().BoolVar(&force, "force", false, "Force re-registration")
