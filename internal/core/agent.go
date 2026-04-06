@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
+
 	"github.com/collei-monitor/collei-agent/internal/api"
 	"github.com/collei-monitor/collei-agent/internal/auth"
 	"github.com/collei-monitor/collei-agent/internal/collector"
@@ -67,16 +69,17 @@ type Agent struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	apiClient   *api.Client
-	collector   *collector.SystemCollector
-	netMonitor  *network.Monitor
-	taskExec    *task.Executor
-	sshManager  *tunnel.Manager
-	termManager *terminal.Manager
-	fileManager *fileapi.Manager
-	verifier    *auth.Verifier
-	autoUpdater *updater.AutoUpdater
-	stateDir    string
+	apiClient     *api.Client
+	collector     *collector.SystemCollector
+	netMonitor    *network.Monitor
+	taskExec      *task.Executor
+	sshManager    *tunnel.Manager
+	termManager   *terminal.Manager
+	fileManager   *fileapi.Manager
+	verifier      *auth.Verifier
+	autoUpdater   *updater.AutoUpdater
+	configWatcher *fsnotify.Watcher
+	stateDir      string
 }
 
 // New 创建一个新的 Agent 实例。
@@ -101,6 +104,7 @@ func New(cfg *config.AgentConfig) *Agent {
 // Run 启动 Agent 主循环（阻塞直到停止）。
 func (a *Agent) Run() {
 	a.setupSignalHandlers()
+	a.setupReloadHandler()
 
 	slog.Info("Collei Agent started", "version", Version)
 
@@ -567,6 +571,10 @@ func (a *Agent) setupSignalHandlers() {
 func (a *Agent) shutdown() {
 	a.State = StateStopped
 	a.netMonitor.Stop()
+	if a.configWatcher != nil {
+		a.configWatcher.Close()
+		a.configWatcher = nil
+	}
 	if a.autoUpdater != nil {
 		a.autoUpdater.Stop()
 		a.autoUpdater = nil
@@ -592,6 +600,80 @@ func (a *Agent) shutdown() {
 		a.apiClient = nil
 	}
 	slog.Info("Agent stopped")
+}
+
+// --- 配置文件监听 ---
+
+// startConfigWatcher 启动 fsnotify 文件监听，配置文件变更后自动重载。
+func (a *Agent) startConfigWatcher() {
+	cfgPath := a.Config.ConfigPath
+	if cfgPath == "" {
+		cfgPath = config.DefaultConfigPath()
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		slog.Warn("failed to create config watcher", "error", err)
+		return
+	}
+	a.configWatcher = watcher
+
+	// 监听配置文件所在目录（fsnotify 要求监听目录以捕获 rename/create 事件）
+	dir := filepath.Dir(cfgPath)
+	base := filepath.Base(cfgPath)
+	if err := watcher.Add(dir); err != nil {
+		slog.Warn("failed to watch config directory", "dir", dir, "error", err)
+		watcher.Close()
+		a.configWatcher = nil
+		return
+	}
+
+	go func() {
+		// 去抖动：多次快速写入只触发一次重载
+		var debounce *time.Timer
+		for {
+			select {
+			case event, ok := <-watcher.Events:
+				if !ok {
+					return
+				}
+				// 仅关注目标配置文件
+				if filepath.Base(event.Name) != base {
+					continue
+				}
+				if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) {
+					// 去抖动：500ms 内的多次写入合并为一次重载
+					if debounce != nil {
+						debounce.Stop()
+					}
+					debounce = time.AfterFunc(500*time.Millisecond, func() {
+						slog.Info("config file changed, reloading...", "path", cfgPath)
+						a.reloadConfig()
+					})
+				}
+			case err, ok := <-watcher.Errors:
+				if !ok {
+					return
+				}
+				slog.Warn("config watcher error", "error", err)
+			case <-a.ctx.Done():
+				return
+			}
+		}
+	}()
+}
+
+// reloadConfig 执行配置热重载。
+func (a *Agent) reloadConfig() {
+	if err := a.Config.ReloadHotFields(); err != nil {
+		slog.Error("config reload failed", "error", err)
+		return
+	}
+	a.collector.UpdateNICFilter(
+		a.Config.NICFilter.Whitelist,
+		a.Config.NICFilter.Blacklist,
+	)
+	slog.Info("config reload complete")
 }
 
 // --- 工具函数 ---

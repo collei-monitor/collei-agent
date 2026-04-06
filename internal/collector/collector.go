@@ -697,6 +697,15 @@ func (c *SystemCollector) nicAllowed(name string) bool {
 	return true
 }
 
+// UpdateNICFilter 运行时更新网卡过滤规则（用于配置热重载）。
+func (c *SystemCollector) UpdateNICFilter(whitelist, blacklist []string) {
+	c.nicWhitelist = compilePatterns(whitelist)
+	c.nicBlacklist = compilePatterns(blacklist)
+	slog.Info("NIC filter updated",
+		"whitelist_count", len(c.nicWhitelist),
+		"blacklist_count", len(c.nicBlacklist))
+}
+
 // --- 工具函数 ---
 
 func monotonicSeconds() float64 {

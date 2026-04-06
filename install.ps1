@@ -91,6 +91,8 @@ param(
     [switch]$Force,
     [switch]$NoAutoUpdate,
     [switch]$ProxyDownload,
+    [string[]]$NicWhitelist,
+    [string[]]$NicBlacklist,
     [string]$InstallDir,
     [string]$ConfigDir,
     [string]$Version = "latest"
@@ -401,6 +403,25 @@ function New-AgentConfig {
     # 自动更新
     if ($script:NoAutoUpdate) {
         $lines += "auto_update: false"
+    }
+
+    # 网卡过滤
+    if ($script:NicWhitelist -or $script:NicBlacklist) {
+        $lines += "nic_filter:"
+        if ($script:NicWhitelist) {
+            $lines += "  whitelist:"
+            foreach ($p in $script:NicWhitelist) {
+                $p = $p.Trim()
+                if ($p) { $lines += "  - `"$p`"" }
+            }
+        }
+        if ($script:NicBlacklist) {
+            $lines += "  blacklist:"
+            foreach ($p in $script:NicBlacklist) {
+                $p = $p.Trim()
+                if ($p) { $lines += "  - `"$p`"" }
+            }
+        }
     }
 
     # 写入 UTF-8 无 BOM

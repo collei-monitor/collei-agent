@@ -49,6 +49,8 @@ SETUP_CA=false
 FORCE=false
 PROXY_DOWNLOAD=false
 NO_AUTO_UPDATE=false
+NIC_WHITELIST=""
+NIC_BLACKLIST=""
 INSTALL_DIR=""
 CONFIG_DIR=""
 VERSION="latest"
@@ -315,6 +317,10 @@ parse_args() {
                 NO_AUTO_UPDATE=true; shift ;;
             --proxy-download)
                 PROXY_DOWNLOAD=true; shift ;;
+            --nic-whitelist)
+                NIC_WHITELIST="$2"; shift 2 ;;
+            --nic-blacklist)
+                NIC_BLACKLIST="$2"; shift 2 ;;
             --install-dir)
                 INSTALL_DIR="$2"; shift 2 ;;
             --config-dir)
@@ -361,6 +367,8 @@ update 选项:
   --force                 强制重新注册
   --no-auto-update        禁用自动版本检查更新
   --proxy-download        通过面板代理下载 Agent 二进制（而非直连 GitHub）
+  --nic-whitelist <RE>    网卡白名单（逗号分隔正则，设置后仅采集匹配的网卡）
+  --nic-blacklist <RE>    网卡黑名单（逗号分隔正则，过滤匹配的网卡；留空使用内置默认）
   --install-dir <DIR>     二进制安装目录
   --config-dir <DIR>      配置文件目录
   --version <VER>         指定版本（如 v0.0.2），默认 latest
@@ -644,6 +652,25 @@ generate_config() {
         if [[ "$NO_AUTO_UPDATE" == true ]]; then
             echo "auto_update: false"
         fi
+        if [[ -n "$NIC_WHITELIST" || -n "$NIC_BLACKLIST" ]]; then
+            echo "nic_filter:"
+            if [[ -n "$NIC_WHITELIST" ]]; then
+                echo "  whitelist:"
+                IFS=',' read -ra _wl <<< "$NIC_WHITELIST"
+                for _p in "${_wl[@]}"; do
+                    _p=$(echo "$_p" | xargs)  # trim whitespace
+                    [[ -n "$_p" ]] && echo "  - \"${_p}\""
+                done
+            fi
+            if [[ -n "$NIC_BLACKLIST" ]]; then
+                echo "  blacklist:"
+                IFS=',' read -ra _bl <<< "$NIC_BLACKLIST"
+                for _p in "${_bl[@]}"; do
+                    _p=$(echo "$_p" | xargs)
+                    [[ -n "$_p" ]] && echo "  - \"${_p}\""
+                done
+            fi
+        fi
     } > "$config_file"
 
     chmod 600 "$config_file"
@@ -696,6 +723,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=${exec_cmd}
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=always
 RestartSec=5
 StandardOutput=journal

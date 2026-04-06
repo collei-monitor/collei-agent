@@ -332,3 +332,36 @@ func Load(path string) *AgentConfig {
 	slog.Info("config loaded", "path", path)
 	return cfg
 }
+
+// ReloadHotFields 从磁盘重读配置文件，仅更新可热重载的字段。
+// 不触碰注册凭据（ServerURL/UUID/Token）和功能开关（SSH/Terminal/FileAPI/Tasks）。
+func (c *AgentConfig) ReloadHotFields() error {
+	path := c.ConfigPath
+	if path == "" {
+		path = DefaultConfigPath()
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+
+	var p persistedConfig
+	if err := yaml.Unmarshal(data, &p); err != nil {
+		return fmt.Errorf("parse config: %w", err)
+	}
+
+	// 仅更新热重载安全的字段
+	c.NetworkInterface = p.NetworkInterface
+	if p.NICFilter != nil {
+		c.NICFilter = *p.NICFilter
+	} else {
+		c.NICFilter = NICFilterConfig{}
+	}
+	if p.AutoUpdate != nil {
+		c.AutoUpdate = *p.AutoUpdate
+	}
+
+	slog.Info("config hot-reloaded", "path", path)
+	return nil
+}
