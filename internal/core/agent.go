@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
 
 	"github.com/collei-monitor/collei-agent/internal/api"
 	"github.com/collei-monitor/collei-agent/internal/auth"
@@ -111,6 +112,9 @@ func (a *Agent) Run() {
 	// 将国际化域名（如中文域名）转换为 Punycode
 	a.Config.ServerURL = config.NormalizeIDNURL(a.Config.ServerURL)
 
+	// 确保 run_id 存在（首次安装或强制注册时生成）
+	a.ensureRunID()
+
 	slog.Info("Backend", "url", a.Config.ServerURL)
 
 	a.apiClient = api.NewClient(a.Config.ServerURL, 0)
@@ -154,6 +158,22 @@ func (a *Agent) RunWithContext(ctx context.Context) {
 	a.cancel() // 取消原始内部上下文
 	a.ctx, a.cancel = context.WithCancel(ctx)
 	a.Run()
+}
+
+// ensureRunID 确保 run_id 存在。首次安装或强制注册时生成新 UUID。
+func (a *Agent) ensureRunID() {
+	if a.Config.ForceRegister {
+		// 强制注册模式：在 register 成功后生成新的 run_id，此处先清空
+		a.Config.RunID = ""
+		return
+	}
+	if a.Config.RunID != "" {
+		slog.Info("using existing run_id", "run_id", a.Config.RunID)
+		return
+	}
+	a.Config.RunID = uuid.New().String()
+	slog.Info("generated new run_id", "run_id", a.Config.RunID)
+	a.Config.Save(a.Config.ConfigPath)
 }
 
 func (a *Agent) loadVerifier() {
@@ -266,6 +286,38 @@ func (a *Agent) initialHandshake() {
 			return
 		}
 
+		// run_id 冲突：有限次重试（可能是正常重启，等待后端标记旧实例离线）
+		if api.IsTokenConflict(err) {
+			slog.Warn("token conflict detected (another agent instance using this token), retrying...")
+			resolved := false
+			for i := 1; i <= 5; i++ {
+				a.interruptibleSleep(5 * time.Second)
+				if a.isStopped() {
+					return
+				}
+				slog.Info("conflict retry", "attempt", i)
+				retryErr := a.doVerify()
+				if retryErr == nil {
+					resolved = true
+					break
+				}
+				if !api.IsTokenConflict(retryErr) {
+					// 不同类型的错误，回到主循环处理
+					err = retryErr
+					break
+				}
+			}
+			if resolved {
+				return
+			}
+			if api.IsTokenConflict(err) {
+				slog.Error("token conflict persists after 5 retries, another agent is using this token — exiting")
+				a.State = StateStopped
+				return
+			}
+			// 非冲突错误，继续主循环
+		}
+
 		// 网络或 API 错误 → 重试
 		slog.Warn("handshake failed, retrying", "error", err)
 		a.interruptibleSleep(5 * time.Second)
@@ -289,6 +341,11 @@ func (a *Agent) doRegister() error {
 
 	a.Config.UUID = resp.UUID
 	a.Config.Token = resp.Token
+
+	// 注册成功后生成新的 run_id
+	a.Config.RunID = uuid.New().String()
+	slog.Info("generated new run_id after registration", "run_id", a.Config.RunID)
+
 	a.Config.Save(a.Config.ConfigPath)
 
 	slog.Info("registration successful", "uuid", resp.UUID)
@@ -307,7 +364,7 @@ func (a *Agent) doVerify() error {
 		name = defaultHostname()
 	}
 
-	resp, err := a.apiClient.Verify(a.Config.Token, name, hw, Version)
+	resp, err := a.apiClient.Verify(a.Config.Token, a.Config.RunID, name, hw, Version)
 	if err != nil {
 		return err
 	}
@@ -339,7 +396,7 @@ func (a *Agent) pollApproval() {
 			return
 		}
 
-		resp, err := a.apiClient.Verify(a.Config.Token, "", nil, Version)
+		resp, err := a.apiClient.Verify(a.Config.Token, a.Config.RunID, "", nil, Version)
 		if err != nil {
 			if api.IsTokenInvalid(err) {
 				slog.Error("token invalid, stopping")
@@ -383,6 +440,7 @@ func (a *Agent) reportLoop() {
 
 			resp, err := a.apiClient.Report(&api.ReportParams{
 				Token:          a.Config.Token,
+				RunID:          a.Config.RunID,
 				Hardware:       hwChanges,
 				LoadData:       load,
 				TotalFlowIn:    flowIn,
@@ -439,6 +497,35 @@ func (a *Agent) handleReportError(err error, networkResults []network.ProbeResul
 
 	if api.IsTokenInvalid(err) {
 		slog.Error("token invalid, stopping reporting")
+		a.State = StateStopped
+		return
+	}
+
+	// run_id 冲突：有限次重试
+	if api.IsTokenConflict(err) {
+		slog.Warn("token conflict during report, retrying...")
+		a.netMonitor.RequeueResults(networkResults)
+		for i := 1; i <= 5; i++ {
+			a.interruptibleSleep(5 * time.Second)
+			if a.isStopped() {
+				return
+			}
+			slog.Info("conflict retry (report)", "attempt", i)
+			// 用 verify 重新握手
+			retryErr := a.doVerify()
+			if retryErr == nil {
+				return // 冲突解决，继续 reportLoop
+			}
+			if !api.IsTokenConflict(retryErr) {
+				// 非冲突错误
+				slog.Error("non-conflict error during retry", "error", retryErr)
+				if api.IsTokenInvalid(retryErr) {
+					a.State = StateStopped
+				}
+				return
+			}
+		}
+		slog.Error("token conflict persists after 5 retries during report — exiting")
 		a.State = StateStopped
 		return
 	}

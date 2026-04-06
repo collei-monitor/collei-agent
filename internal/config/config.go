@@ -49,6 +49,7 @@ type persistedConfig struct {
 	ServerURL        string           `yaml:"server_url,omitempty"`
 	UUID             string           `yaml:"uuid,omitempty"`
 	Token            string           `yaml:"token,omitempty"`
+	RunID            string           `yaml:"run_id,omitempty"`
 	NetworkInterface string           `yaml:"network_interface,omitempty"`
 	NICFilter        *NICFilterConfig `yaml:"nic_filter,omitempty"`
 	SSH              *SSHConfig       `yaml:"ssh,omitempty"`
@@ -65,6 +66,7 @@ type AgentConfig struct {
 	ServerURL        string
 	UUID             string
 	Token            string
+	RunID            string
 	NetworkInterface string
 	NICFilter        NICFilterConfig
 	SSH              SSHConfig
@@ -234,6 +236,7 @@ func (c *AgentConfig) Save(path string) error {
 		ServerURL:        c.ServerURL,
 		UUID:             c.UUID,
 		Token:            c.Token,
+		RunID:            c.RunID,
 		NetworkInterface: c.NetworkInterface,
 	}
 	if len(c.NICFilter.Whitelist) > 0 || len(c.NICFilter.Blacklist) > 0 {
@@ -306,6 +309,7 @@ func Load(path string) *AgentConfig {
 	cfg.ServerURL = p.ServerURL
 	cfg.UUID = p.UUID
 	cfg.Token = p.Token
+	cfg.RunID = p.RunID
 	cfg.NetworkInterface = p.NetworkInterface
 	if p.NICFilter != nil {
 		cfg.NICFilter = *p.NICFilter

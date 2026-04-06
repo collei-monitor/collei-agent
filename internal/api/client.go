@@ -25,6 +25,7 @@ const (
 	ErrGeneric                   ErrorKind = iota
 	ErrTokenInvalid                        // 401
 	ErrServerNotApproved                   // 403
+	ErrTokenConflict                       // 403 (run_id conflict)
 	ErrRegistrationNotConfigured           // 503
 )
 
@@ -143,14 +144,16 @@ func (c *Client) Register(regToken, name string, hardware *collector.HardwareInf
 }
 
 // Verify 执行被动注册或身份验证。
-func (c *Client) Verify(token, name string, hardware *collector.HardwareInfo, version string) (*VerifyResponse, error) {
+func (c *Client) Verify(token, runID, name string, hardware *collector.HardwareInfo, version string) (*VerifyResponse, error) {
 	payload := &struct {
 		Token   string `json:"token"`
+		RunID   string `json:"run_id,omitempty"`
 		Name    string `json:"name,omitempty"`
 		Version string `json:"version,omitempty"`
 		*collector.HardwareInfo
 	}{
 		Token:        token,
+		RunID:        runID,
 		Name:         name,
 		Version:      version,
 		HardwareInfo: hardware,
@@ -166,6 +169,7 @@ func (c *Client) Verify(token, name string, hardware *collector.HardwareInfo, ve
 // ReportParams 聚合 Report 所需的全部参数。
 type ReportParams struct {
 	Token          string
+	RunID          string
 	Hardware       *collector.HardwareInfo
 	LoadData       *collector.LoadData
 	TotalFlowIn    int64
@@ -179,6 +183,7 @@ type ReportParams struct {
 
 type reportPayload struct {
 	Token string `json:"token"`
+	RunID string `json:"run_id,omitempty"`
 	*collector.HardwareInfo
 	LoadData       *collector.LoadData       `json:"load_data,omitempty"`
 	TotalFlowIn    int64                     `json:"total_flow_in"`
@@ -194,6 +199,7 @@ type reportPayload struct {
 func (c *Client) Report(params *ReportParams) (*ReportResponse, error) {
 	payload := &reportPayload{
 		Token:          params.Token,
+		RunID:          params.RunID,
 		HardwareInfo:   params.Hardware,
 		LoadData:       params.LoadData,
 		TotalFlowIn:    params.TotalFlowIn,
@@ -279,7 +285,11 @@ func (c *Client) handleResponse(resp *http.Response, result any) error {
 	case 401:
 		apiErr.Kind = ErrTokenInvalid
 	case 403:
-		apiErr.Kind = ErrServerNotApproved
+		if strings.Contains(detail, "Another agent instance is already reporting with this token") {
+			apiErr.Kind = ErrTokenConflict
+		} else {
+			apiErr.Kind = ErrServerNotApproved
+		}
 	case 503:
 		apiErr.Kind = ErrRegistrationNotConfigured
 	}
@@ -344,4 +354,10 @@ func GetAPIError(err error) (*APIError, bool) {
 		return apiErr, true
 	}
 	return nil, false
+}
+
+// IsTokenConflict 检查错误是否为 run_id 冲突错误。
+func IsTokenConflict(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.Kind == ErrTokenConflict
 }
