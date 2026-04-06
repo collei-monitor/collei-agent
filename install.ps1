@@ -9,7 +9,7 @@
     普通用户模式下安装到用户目录并提示手动启动。
 
 .PARAMETER Command
-    子命令：install（默认）、update、uninstall
+    子命令：install（默认）、update、update-ca、uninstall
 
 .PARAMETER Url
     控制端 API 地址（安装时必须）
@@ -67,6 +67,10 @@
     .\install.ps1 update -Version v0.1.0
 
 .EXAMPLE
+    # 更新 SSH CA 公钥
+    .\install.ps1 update-ca
+
+.EXAMPLE
     # 卸载
     .\install.ps1 uninstall
 
@@ -78,8 +82,10 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("install", "update", "uninstall")]
+    [ValidateSet("install", "update", "update-ca", "uninstall")]
     [string]$Command = "install",
+
+    [string]$ConfigFile,
 
     [string]$Url,
     [string]$RegToken,
@@ -728,6 +734,89 @@ function Invoke-Update {
     Write-Host ""
 }
 
+# ======================== update-ca 流程 ========================
+
+function Invoke-UpdateCA {
+    if (-not (Test-IsAdmin)) {
+        Write-Err "update-ca 需要管理员权限"
+        exit 1
+    }
+
+    Write-Host ""
+    Write-Host "============================================"
+    Write-Host "      Collei Agent CA 公钥更新"
+    Write-Host "============================================"
+    Write-Host ""
+
+    # 确定配置文件路径
+    $cfgFile = $script:ConfigFile
+    if (-not $cfgFile) {
+        foreach ($candidate in @(
+            (Join-Path $env:ProgramData "collei-agent\agent.yaml"),
+            (Join-Path $env:APPDATA "collei-agent\agent.yaml")
+        )) {
+            if (Test-Path $candidate) {
+                $cfgFile = $candidate
+                break
+            }
+        }
+    }
+    if (-not $cfgFile -or -not (Test-Path $cfgFile)) {
+        Write-Err "未找到配置文件，请使用 -ConfigFile 指定路径"
+        exit 1
+    }
+    Write-Info "使用配置文件: $cfgFile"
+
+    # 从 agent.yaml 读取 server_url
+    $cfgContent = Get-Content $cfgFile -Raw -ErrorAction Stop
+    $serverUrl = ""
+    if ($cfgContent -match '(?m)^server_url:\s*(\S+)') {
+        $serverUrl = $Matches[1].TrimEnd("/")
+    }
+    if (-not $serverUrl) {
+        Write-Err "配置文件中未找到 server_url"
+        exit 1
+    }
+
+    # 确定 CA 公钥路径
+    $configDir = Split-Path $cfgFile -Parent
+    $caFile = Join-Path $configDir "ca.pub"
+
+    # 从服务端获取 CA 公钥
+    $caApiUrl = "$serverUrl/api/v1/clients/ssh/ca-public-key"
+    Write-Step "从服务端获取 CA 公钥..."
+    try {
+        $responseText = Invoke-WebGet -Uri $caApiUrl
+        $response = ConvertFrom-Json $responseText
+    } catch {
+        Write-Err "无法获取 CA 公钥: $_"
+        exit 1
+    }
+
+    $pubKey = $response.public_key
+    $oldPubKey = $response.old_public_key
+
+    if (-not $pubKey) {
+        Write-Err "CA 公钥响应格式异常"
+        exit 1
+    }
+
+    # 写入公钥文件
+    $caContent = $pubKey
+    if ($oldPubKey) {
+        $caContent += "`n$oldPubKey"
+        Write-Info "检测到密钥轮换过渡期，已同时写入新旧公钥"
+    }
+    [System.IO.File]::WriteAllText($caFile, $caContent, [System.Text.UTF8Encoding]::new($false))
+    Write-Info "CA 公钥已更新: $caFile"
+
+    Write-Host ""
+    Write-Host "============================================"
+    Write-Info "CA 公钥更新完成！"
+    Write-Host "============================================"
+    Write-Host ""
+}
+
 # ======================== 卸载流程 ========================
 
 function Invoke-Uninstall {
@@ -808,7 +897,8 @@ if ($env:OS -ne "Windows_NT") {
 }
 
 switch ($Command) {
-    "install"   { Invoke-Install }
-    "update"    { Invoke-Update }
-    "uninstall" { Invoke-Uninstall }
+    "install"    { Invoke-Install }
+    "update"     { Invoke-Update }
+    "update-ca"  { Invoke-UpdateCA }
+    "uninstall"  { Invoke-Uninstall }
 }
