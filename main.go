@@ -116,7 +116,7 @@ func main() {
 		Use:   "collect",
 		Short: "Test system data collection (no backend connection)",
 		Run: func(cmd *cobra.Command, args []string) {
-			c := collector.NewSystemCollector(context.Background(), "", "")
+			c := collector.NewSystemCollector(context.Background(), "", "", nil, nil)
 
 			fmt.Println("=== Hardware Info ===")
 			hw := c.CollectHardware()

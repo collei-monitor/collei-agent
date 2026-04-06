@@ -36,18 +36,27 @@ type TasksConfig struct {
 	Explicit bool `yaml:"explicit,omitempty"` // 是否由用户显式配置（非默认跟随 SSH）
 }
 
+// NICFilterConfig 存储网卡过滤配置（白名单/黑名单）。
+// 留空时，默认过滤 Docker/K8s 等虚拟网卡。
+// 支持正则表达式。
+type NICFilterConfig struct {
+	Whitelist []string `yaml:"whitelist,omitempty"` // 白名单（正则），设置后仅采集匹配的网卡
+	Blacklist []string `yaml:"blacklist,omitempty"` // 黑名单（正则），过滤匹配的网卡
+}
+
 // persistedConfig 是写入 agent.yaml 的字段子集。
 type persistedConfig struct {
-	ServerURL        string          `yaml:"server_url,omitempty"`
-	UUID             string          `yaml:"uuid,omitempty"`
-	Token            string          `yaml:"token,omitempty"`
-	NetworkInterface string          `yaml:"network_interface,omitempty"`
-	SSH              *SSHConfig      `yaml:"ssh,omitempty"`
-	Terminal         *TerminalConfig `yaml:"terminal,omitempty"`
-	FileAPI          *FileAPIConfig  `yaml:"file_api,omitempty"`
-	Tasks            *TasksConfig    `yaml:"tasks,omitempty"`
-	CAPublicKeyPath  string          `yaml:"ca_public_key_path,omitempty"`
-	AutoUpdate       *bool           `yaml:"auto_update,omitempty"`
+	ServerURL        string           `yaml:"server_url,omitempty"`
+	UUID             string           `yaml:"uuid,omitempty"`
+	Token            string           `yaml:"token,omitempty"`
+	NetworkInterface string           `yaml:"network_interface,omitempty"`
+	NICFilter        *NICFilterConfig `yaml:"nic_filter,omitempty"`
+	SSH              *SSHConfig       `yaml:"ssh,omitempty"`
+	Terminal         *TerminalConfig  `yaml:"terminal,omitempty"`
+	FileAPI          *FileAPIConfig   `yaml:"file_api,omitempty"`
+	Tasks            *TasksConfig     `yaml:"tasks,omitempty"`
+	CAPublicKeyPath  string           `yaml:"ca_public_key_path,omitempty"`
+	AutoUpdate       *bool            `yaml:"auto_update,omitempty"`
 }
 
 // AgentConfig 存储完整的 Agent 配置。
@@ -57,6 +66,7 @@ type AgentConfig struct {
 	UUID             string
 	Token            string
 	NetworkInterface string
+	NICFilter        NICFilterConfig
 	SSH              SSHConfig
 	Terminal         TerminalConfig
 	FileAPI          FileAPIConfig
@@ -226,6 +236,9 @@ func (c *AgentConfig) Save(path string) error {
 		Token:            c.Token,
 		NetworkInterface: c.NetworkInterface,
 	}
+	if len(c.NICFilter.Whitelist) > 0 || len(c.NICFilter.Blacklist) > 0 {
+		p.NICFilter = &c.NICFilter
+	}
 	if c.SSH.Enabled {
 		p.SSH = &c.SSH
 	}
@@ -294,6 +307,9 @@ func Load(path string) *AgentConfig {
 	cfg.UUID = p.UUID
 	cfg.Token = p.Token
 	cfg.NetworkInterface = p.NetworkInterface
+	if p.NICFilter != nil {
+		cfg.NICFilter = *p.NICFilter
+	}
 	if p.SSH != nil {
 		cfg.SSH = *p.SSH
 	}

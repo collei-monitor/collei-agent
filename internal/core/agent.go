@@ -93,7 +93,7 @@ func New(cfg *config.AgentConfig) *Agent {
 		ctx:        ctx,
 		cancel:     cancel,
 		stateDir:   stateDir,
-		collector:  collector.NewSystemCollector(ctx, cfg.NetworkInterface, stateDir),
+		collector:  collector.NewSystemCollector(ctx, cfg.NetworkInterface, stateDir, cfg.NICFilter.Whitelist, cfg.NICFilter.Blacklist),
 		netMonitor: network.NewMonitor(ctx),
 	}
 }

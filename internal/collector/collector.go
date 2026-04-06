@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -79,6 +80,9 @@ type SystemCollector struct {
 	networkInterface string
 	netStateFile     string
 
+	nicWhitelist []*regexp.Regexp
+	nicBlacklist []*regexp.Regexp
+
 	prevNet     *[2]int64 // [rx, tx]
 	currentNet  *[2]int64
 	prevNetTime *float64
@@ -93,12 +97,14 @@ type SystemCollector struct {
 }
 
 // NewSystemCollector 创建一个新的采集器。
-func NewSystemCollector(ctx context.Context, networkInterface, stateDir string) *SystemCollector {
+func NewSystemCollector(ctx context.Context, networkInterface, stateDir string, whitelist, blacklist []string) *SystemCollector {
 	c := &SystemCollector{
 		ctx:              ctx,
 		networkInterface: networkInterface,
 		hwCacheTTL:       300.0, // 5 minutes
 	}
+	c.nicWhitelist = compilePatterns(whitelist)
+	c.nicBlacklist = compilePatterns(blacklist)
 	if stateDir != "" {
 		c.netStateFile = filepath.Join(stateDir, "net_state.json")
 	}
@@ -244,6 +250,9 @@ func (c *SystemCollector) CollectNetIO() []NetInterface {
 	var result []NetInterface
 	for _, ctr := range counters {
 		if ctr.BytesRecv == 0 && ctr.BytesSent == 0 {
+			continue
+		}
+		if !c.nicAllowed(ctr.Name) {
 			continue
 		}
 		result = append(result, NetInterface{
@@ -618,6 +627,74 @@ func (c *SystemCollector) saveNetState(rx, tx int64) {
 	}
 	data, _ := json.Marshal(netState{RX: rx, TX: tx})
 	_ = os.WriteFile(c.netStateFile, data, 0o644)
+}
+
+// --- 网卡过滤 ---
+
+// defaultNICBlacklist 是留空配置时的默认黑名单正则，
+// 过滤 Docker / Kubernetes / 常见虚拟网卡。
+var defaultNICBlacklist = []*regexp.Regexp{
+	regexp.MustCompile(`^docker\d*$`),
+	regexp.MustCompile(`^veth`),
+	regexp.MustCompile(`^br-`),
+	regexp.MustCompile(`^cni\d*$`),
+	regexp.MustCompile(`^flannel`),
+	regexp.MustCompile(`^cali`),
+	regexp.MustCompile(`^weave`),
+	regexp.MustCompile(`^kube-`),
+	regexp.MustCompile(`^vxlan`),
+	regexp.MustCompile(`^tunl\d*$`),
+	regexp.MustCompile(`^dummy`),
+	regexp.MustCompile(`^virbr`),
+	regexp.MustCompile(`^lxc`),
+	regexp.MustCompile(`^lxd`),
+	regexp.MustCompile(`^podman`),
+}
+
+// compilePatterns 编译正则表达式列表，跳过无效模式。
+func compilePatterns(patterns []string) []*regexp.Regexp {
+	var res []*regexp.Regexp
+	for _, p := range patterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			slog.Warn("invalid NIC filter pattern, skipping", "pattern", p, "error", err)
+			continue
+		}
+		res = append(res, re)
+	}
+	return res
+}
+
+// nicAllowed 判断网卡名称是否应被采集。
+// 优先级：白名单 > 黑名单 > 默认黑名单。
+func (c *SystemCollector) nicAllowed(name string) bool {
+	// 白名单模式：仅采集匹配白名单的网卡
+	if len(c.nicWhitelist) > 0 {
+		for _, re := range c.nicWhitelist {
+			if re.MatchString(name) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// 自定义黑名单：如果配置了自定义黑名单，仅使用自定义黑名单
+	if len(c.nicBlacklist) > 0 {
+		for _, re := range c.nicBlacklist {
+			if re.MatchString(name) {
+				return false
+			}
+		}
+		return true
+	}
+
+	// 默认黑名单：过滤 Docker/K8s 等虚拟网卡
+	for _, re := range defaultNICBlacklist {
+		if re.MatchString(name) {
+			return false
+		}
+	}
+	return true
 }
 
 // --- 工具函数 ---
